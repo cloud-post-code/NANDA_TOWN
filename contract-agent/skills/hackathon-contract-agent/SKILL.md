@@ -1,0 +1,225 @@
+# Hackathon Contract Agent
+
+Generate, fill, and notarize A2A service contracts priced on an agent token premium system. Built at the Nanda Town Hackathon. Exposes the finished contract as a `.md` file any other agent can fetch, inspect, and sign.
+
+## Base URL
+
+https://hackathon-contract-agent-production.up.railway.app
+
+## What it does
+
+An agent calls this skill to:
+1. **Generate** a filled A2A service contract for a hackathon-built service offering
+2. **Price** the engagement using the token-premium pricing model (tokens + skill premium)
+3. **Send the contract to the Town Notary** for cryptographic countersignature
+4. **Expose the executed contract** as a stable `.md` URL other agents can fetch
+
+The contract follows the `a2a_contract_version: "0.2"` format and is machine-readable by any OpenClaw-compatible agent.
+
+---
+
+## Endpoints
+
+### POST /contracts/generate
+Create a new draft contract for a hackathon service offering.
+
+**Body (JSON):**
+```json
+{
+  "service_name": "The name of your hackathon-built service",
+  "provider_agent": "Your agent name and version",
+  "provider_endpoint": "https://your-agent.example.com",
+  "provider_human": "Your name or team name",
+  "client_agent": "Calling agent name/version",
+  "client_endpoint": "https://client-agent.example.com",
+  "client_human": "Client representative name",
+  "package": "starter | standard | premium",
+  "smart_goal": "By [date], Provider will [work] so that [result]",
+  "in_scope": ["item1", "item2"],
+  "out_of_scope": ["item1"],
+  "deliverables": [
+    {
+      "name": "Deliverable name",
+      "format": "Markdown | JSON | URL | API result",
+      "due_date": "YYYY-MM-DD",
+      "acceptance_criteria": "What checkable condition proves it done",
+      "revisions_included": 2
+    }
+  ],
+  "token_estimate": 50000,
+  "skill_premium_tokens": 10000,
+  "currency": "tokens | USD | credits",
+  "ip_model": "client_ownership | provider_license | open",
+  "human_review_required": true,
+  "governing_jurisdiction": "California, USA",
+  "questions": {
+    "who_do_you_help": "Who is the target user or agent",
+    "what_do_you_deliver": "Concrete output description",
+    "what_are_you_accessing": "APIs, data, or systems touched",
+    "are_there_deliverable_questions": "Any open scope questions",
+    "standard_policy": "Any platform or safety policy that applies",
+    "appropriation_policy": "IP or data reuse constraints"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "contract_id": "A2A-20260628-001",
+  "status": "draft",
+  "contract_url": "https://hackathon-contract-agent-production.up.railway.app/contracts/A2A-20260628-001.md",
+  "notary_status": "pending",
+  "next_step": "POST /contracts/{contract_id}/notarize to send to Town Notary"
+}
+```
+
+---
+
+### GET /contracts/{contract_id}.md
+Fetch the filled contract as a raw Markdown file. This is the machine-readable artifact other agents consume.
+
+**Example:**
+```
+GET https://hackathon-contract-agent-production.up.railway.app/contracts/A2A-20260628-001.md
+```
+
+**Response:** Raw `.md` file with all fields filled, pricing computed, and (once notarized) the Notary countersignature appended in Section 17.
+
+---
+
+### POST /contracts/{contract_id}/notarize
+Submit the draft contract to the Town Notary for countersignature. Loops in the Notary automatically — you do not call the Notary directly.
+
+The agent will:
+1. Compute a SHA-256 hash of the contract body
+2. POST to `https://town-notary-production.up.railway.app/countersign` with the badge payload
+3. Append the Notary's countersignature to Section 17 of the contract
+4. Set contract `status` to `executed`
+
+**Body:** Empty — contract_id in the path is sufficient.
+
+**Response:**
+```json
+{
+  "contract_id": "A2A-20260628-001",
+  "status": "executed",
+  "notary_signature_id": "notary-sig-abc123",
+  "notary_timestamp": "2026-06-28T14:30:00Z",
+  "contract_url": "https://hackathon-contract-agent-production.up.railway.app/contracts/A2A-20260628-001.md",
+  "notary_inspect_url": "https://town-notary-production.up.railway.app/inspect?runtime=A2A-20260628-001"
+}
+```
+
+---
+
+### GET /contracts/{contract_id}/status
+Check whether a contract is draft, proposed, accepted, or executed, and whether the Notary has countersigned.
+
+**Response:**
+```json
+{
+  "contract_id": "A2A-20260628-001",
+  "status": "executed",
+  "notary_countersigned": true,
+  "notary_signature_id": "notary-sig-abc123",
+  "contract_url": "https://hackathon-contract-agent-production.up.railway.app/contracts/A2A-20260628-001.md"
+}
+```
+
+---
+
+### POST /contracts/{contract_id}/accept
+Client agent records acceptance of the contract. Sets status to `accepted` in the Agent Confirmation Record (Section 14).
+
+**Body:**
+```json
+{
+  "accepting_agent": "client-agent-name/version",
+  "accepting_human": "Human representative name",
+  "action": "accepted"
+}
+```
+
+---
+
+### GET /contracts
+List all contracts generated by this agent. Useful for discovery by other agents.
+
+**Response:**
+```json
+{
+  "count": 3,
+  "contracts": [
+    {
+      "contract_id": "A2A-20260628-001",
+      "service_name": "Survey Answering Service",
+      "status": "executed",
+      "contract_url": "https://hackathon-contract-agent-production.up.railway.app/contracts/A2A-20260628-001.md"
+    }
+  ]
+}
+```
+
+---
+
+## Pricing model — token premium system
+
+The contract enforces a **three-layer pricing model** derived from the hackathon whiteboard design:
+
+| Layer | What it is | How it's set |
+|---|---|---|
+| **Token / platform usage** | Raw LLM + API compute cost | Estimated from `token_estimate`; capped at `token_estimate × 1.2` |
+| **Materials** | Third-party licenses, stock, infra | Pre-approval required; listed per deliverable |
+| **Skill premium** | Value of the agent's capability above raw tokens | Set by provider in `skill_premium_tokens`; described as "X% better than doing it yourself" |
+
+The total cap = `(token_estimate × model_rate) + materials + skill_premium`. Provider may not exceed the cap without a change request. The contract explains this to both parties in Section 4.
+
+---
+
+## Offer menu — agents should offer multiple tiers
+
+The contract template includes an offer menu (Section 5). When generating, the API auto-populates three tiers:
+
+| Tier | What changes |
+|---|---|
+| **Starter** | Core deliverable only, 1 revision, lower token cap |
+| **Standard** | Core + follow-up prompts, 3 revisions, standard cap |
+| **Premium** | Full scope + priority, 5 revisions, higher skill premium |
+
+Client selects one. Starter and Standard prices are negotiable. Safety, privacy, and minimum payment are never negotiable.
+
+---
+
+## Town Notary integration
+
+Every executed contract goes through **The Town Notary** (`https://town-notary-production.up.railway.app`) for countersignature. This is required — the contract is not considered binding between agents until the Notary stamps it.
+
+**What the Notary does:**
+- Verifies the contract hash offline (`POST /verify`)
+- Countersigns under its own Ed25519 key (`POST /countersign`)
+- Enters the contract in the public register (`POST /register`)
+- Makes it inspectable by any third-party agent (`GET /inspect?runtime={contract_id}`)
+
+**Why this matters:** Before transacting, a client agent should call `GET https://town-notary-production.up.railway.app/inspect?runtime={contract_id}` to confirm the Notary stamped the contract. If the runtime is not in the register, the contract is not yet binding.
+
+The `/notarize` endpoint on this skill handles the full Notary loop automatically — you do not need to call the Notary yourself.
+
+---
+
+## How an agent should use this skill
+
+1. **Generate** — POST `/contracts/generate` with your service details. You get back a `contract_id` and a draft `.md` URL.
+2. **Review** — GET `/{contract_id}.md` to read the filled contract. Check scope, pricing, and deliverables.
+3. **Send to Notary** — POST `/{contract_id}/notarize`. The skill loops in the Town Notary and appends the countersignature.
+4. **Share the URL** — Give the client agent the `.md` URL. They read it, then POST `/{contract_id}/accept` to record acceptance.
+5. **Inspect before paying** — Before releasing tokens, any agent can call `GET https://town-notary-production.up.railway.app/inspect?runtime={contract_id}` to verify the Notary stamp is real.
+
+---
+
+## Reference
+
+- `reference/contract-template.md` — The filled A2A contract template this skill outputs
+- `reference/pricing-guide.md` — How to set skill_premium_tokens and token_estimate
+- `reference/notary-integration.md` — Town Notary endpoint details and error handling
+- `reference/submission-guidelines.md` — How to submit this skill to the Nanda Town registry
