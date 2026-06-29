@@ -3,4 +3,3 @@ uvicorn[standard]==0.32.1
 pydantic==2.10.4
 cryptography==44.0.2
 jcs==0.2.1
-sm-conformance==0.3.2
