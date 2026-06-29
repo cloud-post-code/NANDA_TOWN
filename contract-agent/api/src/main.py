@@ -12,6 +12,7 @@ Notarize: submits a conformance-badge envelope to the Town Notary
 (https://town-notary-production.up.railway.app) — an external service operated by
 stellarminds.ai, not this deployment.
 """
+import base64
 import hashlib
 import json
 import os
@@ -774,13 +775,14 @@ def notarize_contract(contract_id: str):
     # Canonical JSON: sorted keys, no spaces (matches sm-conformance convention)
     payload_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode()
     sig_bytes     = _AGENT_PRIVKEY.sign(payload_bytes)
-    sig_hex       = sig_bytes.hex()
+    # Notary expects base64 (standard, with padding) — not hex, not base64url
+    sig_b64 = base64.b64encode(sig_bytes).decode()
 
     badge = {
         "payload":   payload_dict,
         "signed_by": _AGENT_DID_KEY,
         "signed_at": now_iso,
-        "signature": sig_hex,
+        "signature": sig_b64,
     }
 
     notary_resp  = None
