@@ -7,13 +7,20 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(title="Hackathon Contract Agent", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 NOTARY_BASE = "https://town-notary-production.up.railway.app"
 SELF_BASE = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
@@ -517,7 +524,7 @@ def generate_contract(req: GenerateRequest):
         "status": "draft",
         "contract_url": f"{SELF_BASE}/contracts/{contract_id}.md",
         "notary_status": "pending",
-        "next_step": f"POST {SELF_BASE}/contracts/{contract_id}/notarize to send to Town Notary",
+        "next_step": f"POST {SELF_BASE}/contracts/{contract_id}/seal when ready, then parties contact Town Notary per Section 12",
     }
 
 
@@ -529,47 +536,29 @@ def get_contract_md(contract_id: str):
     return Response(content=rendered, media_type="text/markdown")
 
 
-@app.post("/contracts/{contract_id}/notarize")
-async def notarize_contract(contract_id: str):
+@app.post("/contracts/{contract_id}/seal")
+def seal_contract(contract_id: str):
+    """Mark a contract as sealed (ready for parties to loop in the Town Notary).
+
+    The Town Notary is referenced in Section 12 of the contract — parties must
+    contact the Notary directly at https://town-notary-production.up.railway.app
+    to countersign. This agent does not proxy the Notary.
+    """
     if contract_id not in _contracts:
         raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
-
     contract = _contracts[contract_id]
+    contract["status"] = "sealed"
+    contract["sealed_at"] = datetime.utcnow().isoformat() + "Z"
     contract_url = f"{SELF_BASE}/contracts/{contract_id}.md"
-
-    # Build a signed conformance badge from the contract hash and submit inline
-    badge = _sign_badge(contract_id, contract["contract_hash"])
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # First verify the badge is valid
-            verify_resp = await client.post(f"{NOTARY_BASE}/verify", json={"badge": badge})
-            verify_data = verify_resp.json()
-
-            # Submit to register regardless of certification — the Notary records it
-            reg_resp = await client.post(f"{NOTARY_BASE}/register", json={"badge": badge})
-            notary_data = reg_resp.json() if reg_resp.status_code < 300 else {}
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Notary unreachable: {e}")
-
-    contract["notary_signature_id"] = notary_data.get("notary_sig", badge["signature"][:16] + "...")
-    contract["notary_timestamp"] = badge["signed_at"]
-    contract["notary_did_key"] = NOTARY_BASE  # Notary's identity
-    contract["agent_did"] = _AGENT_DID
-    contract["notary_verify_result"] = verify_data
-    contract["status"] = "executed"
-
-    # Re-hash after notary fields are added
-    rendered = _render_contract(contract)
-    contract["contract_hash"] = hashlib.sha256(rendered.encode()).hexdigest()
-
     return {
         "contract_id": contract_id,
-        "status": "executed",
-        "notary_signature_id": contract["notary_signature_id"],
-        "notary_timestamp": contract["notary_timestamp"],
+        "status": "sealed",
         "contract_url": contract_url,
-        "notary_inspect_url": f"{NOTARY_BASE}/inspect?runtime={contract_id}",
+        "notary_instructions": (
+            "To countersign this contract, the parties must contact the Town Notary directly. "
+            f"See Section 12 of {contract_url} for the full process. "
+            f"Town Notary base URL: {NOTARY_BASE}"
+        ),
     }
 
 
@@ -608,4 +597,84 @@ def accept_contract(contract_id: str, req: AcceptRequest):
         "status": contract["status"],
         "client_action": req.action,
         "contract_url": f"{SELF_BASE}/contracts/{contract_id}.md",
+    }
+
+
+# ── Skill and reference doc endpoints ────────────────────────────────────────
+
+_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "hackathon-contract-agent"
+
+REFERENCE_FILES = {
+    "contract-template": "reference/contract-template.md",
+    "pricing-guide": "reference/pricing-guide.md",
+    "notary-integration": "reference/notary-integration.md",
+    "submission-guidelines": "reference/submission-guidelines.md",
+}
+
+
+@app.get("/skill.md", response_class=PlainTextResponse)
+def serve_skill_md():
+    p = _SKILLS_DIR / "SKILL.md"
+    if p.exists():
+        return p.read_text()
+    raise HTTPException(status_code=404, detail="SKILL.md not found")
+
+
+@app.get("/skills", response_class=PlainTextResponse)
+def list_skills():
+    """Return the SKILL.md — same as /skill.md, canonical discovery endpoint."""
+    p = _SKILLS_DIR / "SKILL.md"
+    if p.exists():
+        return p.read_text()
+    raise HTTPException(status_code=404, detail="SKILL.md not found")
+
+
+@app.get("/reference", response_class=PlainTextResponse)
+def list_reference():
+    lines = ["# Reference Documents\n"]
+    for name, path in REFERENCE_FILES.items():
+        lines.append(f"- [{name}]({SELF_BASE}/reference/{name})")
+    return "\n".join(lines)
+
+
+@app.get("/reference/{doc_name}", response_class=PlainTextResponse)
+def serve_reference_doc(doc_name: str):
+    if doc_name not in REFERENCE_FILES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown doc '{doc_name}'. Available: {list(REFERENCE_FILES.keys())}",
+        )
+    p = _SKILLS_DIR / REFERENCE_FILES[doc_name]
+    if p.exists():
+        return p.read_text()
+    raise HTTPException(status_code=404, detail=f"File not found: {p}")
+
+
+@app.get("/agent.json")
+def agent_card():
+    """Machine-readable agent identity card for A2A discovery."""
+    return {
+        "name": "Hackathon Contract Agent",
+        "version": "1.0.0",
+        "did": _AGENT_DID,
+        "base_url": SELF_BASE,
+        "skill_url": f"{SELF_BASE}/skill.md",
+        "description": "Generates, prices, and exposes A2A service contracts with token-premium pricing. Town Notary countersignature is handled by parties directly per Section 12 of each contract.",
+        "endpoints": {
+            "generate": f"POST {SELF_BASE}/contracts/generate",
+            "get_contract": f"GET {SELF_BASE}/contracts/{{contract_id}}.md",
+            "seal": f"POST {SELF_BASE}/contracts/{{contract_id}}/seal",
+            "status": f"GET {SELF_BASE}/contracts/{{contract_id}}/status",
+            "accept": f"POST {SELF_BASE}/contracts/{{contract_id}}/accept",
+            "list": f"GET {SELF_BASE}/contracts",
+            "skill": f"GET {SELF_BASE}/skill.md",
+            "reference_list": f"GET {SELF_BASE}/reference",
+            "reference_doc": f"GET {SELF_BASE}/reference/{{doc_name}}",
+        },
+        "notary": {
+            "name": "The Town Notary",
+            "url": NOTARY_BASE,
+            "role": "Countersigns executed contracts. Parties contact the Notary directly per Section 12 of the contract.",
+        },
+        "tags": ["contracts", "a2a", "pricing", "tokens", "hackathon"],
     }
