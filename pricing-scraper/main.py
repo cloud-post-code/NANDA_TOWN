@@ -122,8 +122,9 @@ def root():
     cache = _load_cache()
     return {
         "service": "LLM Pricing Scraper",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "docs": "/docs",
+        "skill": "https://pricing-scraper-production.up.railway.app/skill.md",
         "scraped_at": cache.get("scraped_at"),
         "as_of": cache.get("as_of"),
         "model_count": len(cache.get("all_models", [])),
@@ -133,8 +134,18 @@ def root():
             "single_model":   "GET /pricing/models/{model_id}",
             "scrape_status":  "GET /scrape/status",
             "trigger_scrape": "POST /scrape/run",
+            "skill":          "GET /skill.md",
         },
     }
+
+
+@app.get("/skill.md")
+def serve_skill_md():
+    from fastapi.responses import PlainTextResponse
+    p = Path(__file__).parent / "SKILL.md"
+    if p.exists():
+        return PlainTextResponse(p.read_text())
+    raise HTTPException(status_code=404, detail="SKILL.md not found")
 
 
 @app.get("/pricing/models")
