@@ -454,11 +454,13 @@ def generate_contract(req: GenerateRequest):
         "governing_jurisdiction": req.governing_jurisdiction,
         "questions": req.questions.model_dump(),
         "tiers": tiers,
+        "contract_hash": "pending",
     }
 
-    # Compute hash from the rendered contract body
+    # Render once with placeholder hash, then compute real hash and re-render
     rendered = _render_contract(data)
     data["contract_hash"] = hashlib.sha256(rendered.encode()).hexdigest()
+    rendered = _render_contract(data)
 
     _contracts[contract_id] = data
 
