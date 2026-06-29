@@ -10,6 +10,293 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
+# ── LLM Pricing catalog ───────────────────────────────────────────────────────
+# Prices in USD per 1M tokens. Updated manually; source links in each entry.
+# Llama and GLM are open-source so we list typical hosted-API prices (e.g. Together AI / ZhipuAI).
+
+_LLM_PRICING: list[dict] = [
+    # ── Anthropic Claude ──────────────────────────────────────────────────────
+    {
+        "provider": "Anthropic",
+        "family": "Claude",
+        "model": "claude-opus-4-8",
+        "display_name": "Claude Opus 4.8",
+        "input_per_1m_usd": 5.00,
+        "output_per_1m_usd": 25.00,
+        "context_window_k": 1000,
+        "notes": "Most capable Opus-tier model",
+        "source": "https://www.anthropic.com/pricing",
+    },
+    {
+        "provider": "Anthropic",
+        "family": "Claude",
+        "model": "claude-opus-4-7",
+        "display_name": "Claude Opus 4.7",
+        "input_per_1m_usd": 5.00,
+        "output_per_1m_usd": 25.00,
+        "context_window_k": 1000,
+        "notes": "Previous-generation Opus",
+        "source": "https://www.anthropic.com/pricing",
+    },
+    {
+        "provider": "Anthropic",
+        "family": "Claude",
+        "model": "claude-sonnet-4-6",
+        "display_name": "Claude Sonnet 4.6",
+        "input_per_1m_usd": 3.00,
+        "output_per_1m_usd": 15.00,
+        "context_window_k": 1000,
+        "notes": "Best speed/intelligence balance",
+        "source": "https://www.anthropic.com/pricing",
+    },
+    {
+        "provider": "Anthropic",
+        "family": "Claude",
+        "model": "claude-haiku-4-5",
+        "display_name": "Claude Haiku 4.5",
+        "input_per_1m_usd": 1.00,
+        "output_per_1m_usd": 5.00,
+        "context_window_k": 200,
+        "notes": "Fastest and most cost-effective",
+        "source": "https://www.anthropic.com/pricing",
+    },
+    {
+        "provider": "Anthropic",
+        "family": "Claude",
+        "model": "claude-fable-5",
+        "display_name": "Claude Fable 5",
+        "input_per_1m_usd": 10.00,
+        "output_per_1m_usd": 50.00,
+        "context_window_k": 1000,
+        "notes": "Most capable widely released Claude model",
+        "source": "https://www.anthropic.com/pricing",
+    },
+    # ── OpenAI GPT ───────────────────────────────────────────────────────────
+    {
+        "provider": "OpenAI",
+        "family": "GPT",
+        "model": "gpt-4o",
+        "display_name": "GPT-4o",
+        "input_per_1m_usd": 2.50,
+        "output_per_1m_usd": 10.00,
+        "context_window_k": 128,
+        "notes": "Flagship multimodal model",
+        "source": "https://openai.com/api/pricing/",
+    },
+    {
+        "provider": "OpenAI",
+        "family": "GPT",
+        "model": "gpt-4o-mini",
+        "display_name": "GPT-4o mini",
+        "input_per_1m_usd": 0.15,
+        "output_per_1m_usd": 0.60,
+        "context_window_k": 128,
+        "notes": "Cost-efficient small model",
+        "source": "https://openai.com/api/pricing/",
+    },
+    {
+        "provider": "OpenAI",
+        "family": "GPT",
+        "model": "gpt-4-turbo",
+        "display_name": "GPT-4 Turbo",
+        "input_per_1m_usd": 10.00,
+        "output_per_1m_usd": 30.00,
+        "context_window_k": 128,
+        "notes": "High-capability with vision",
+        "source": "https://openai.com/api/pricing/",
+    },
+    {
+        "provider": "OpenAI",
+        "family": "GPT",
+        "model": "o1",
+        "display_name": "o1",
+        "input_per_1m_usd": 15.00,
+        "output_per_1m_usd": 60.00,
+        "context_window_k": 200,
+        "notes": "Reasoning model",
+        "source": "https://openai.com/api/pricing/",
+    },
+    {
+        "provider": "OpenAI",
+        "family": "GPT",
+        "model": "o3-mini",
+        "display_name": "o3-mini",
+        "input_per_1m_usd": 1.10,
+        "output_per_1m_usd": 4.40,
+        "context_window_k": 200,
+        "notes": "Cost-efficient reasoning model",
+        "source": "https://openai.com/api/pricing/",
+    },
+    # ── Google Gemini ─────────────────────────────────────────────────────────
+    {
+        "provider": "Google",
+        "family": "Gemini",
+        "model": "gemini-2.5-pro",
+        "display_name": "Gemini 2.5 Pro",
+        "input_per_1m_usd": 1.25,
+        "output_per_1m_usd": 10.00,
+        "context_window_k": 1000,
+        "notes": "Most capable Gemini; ≤200k tokens input price shown",
+        "source": "https://ai.google.dev/pricing",
+    },
+    {
+        "provider": "Google",
+        "family": "Gemini",
+        "model": "gemini-2.5-flash",
+        "display_name": "Gemini 2.5 Flash",
+        "input_per_1m_usd": 0.075,
+        "output_per_1m_usd": 0.30,
+        "context_window_k": 1000,
+        "notes": "Fast and cost-efficient",
+        "source": "https://ai.google.dev/pricing",
+    },
+    {
+        "provider": "Google",
+        "family": "Gemini",
+        "model": "gemini-1.5-pro",
+        "display_name": "Gemini 1.5 Pro",
+        "input_per_1m_usd": 1.25,
+        "output_per_1m_usd": 5.00,
+        "context_window_k": 2000,
+        "notes": "Long-context; ≤128k tokens price shown",
+        "source": "https://ai.google.dev/pricing",
+    },
+    {
+        "provider": "Google",
+        "family": "Gemini",
+        "model": "gemini-1.5-flash",
+        "display_name": "Gemini 1.5 Flash",
+        "input_per_1m_usd": 0.075,
+        "output_per_1m_usd": 0.30,
+        "context_window_k": 1000,
+        "notes": "Speed-optimized; ≤128k price shown",
+        "source": "https://ai.google.dev/pricing",
+    },
+    # ── Meta Llama (via Together AI hosted API) ───────────────────────────────
+    {
+        "provider": "Meta (hosted: Together AI)",
+        "family": "Llama",
+        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "display_name": "Llama 3.3 70B Instruct Turbo",
+        "input_per_1m_usd": 0.88,
+        "output_per_1m_usd": 0.88,
+        "context_window_k": 128,
+        "notes": "Open-source; price from Together AI hosted API",
+        "source": "https://www.together.ai/pricing",
+    },
+    {
+        "provider": "Meta (hosted: Together AI)",
+        "family": "Llama",
+        "model": "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
+        "display_name": "Llama 3.1 405B Instruct Turbo",
+        "input_per_1m_usd": 3.50,
+        "output_per_1m_usd": 3.50,
+        "context_window_k": 128,
+        "notes": "Largest open-source Llama; Together AI hosted price",
+        "source": "https://www.together.ai/pricing",
+    },
+    {
+        "provider": "Meta (hosted: Together AI)",
+        "family": "Llama",
+        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+        "display_name": "Llama 3.1 8B Instruct Turbo",
+        "input_per_1m_usd": 0.18,
+        "output_per_1m_usd": 0.18,
+        "context_window_k": 128,
+        "notes": "Lightweight open-source; Together AI hosted price",
+        "source": "https://www.together.ai/pricing",
+    },
+    # ── Zhipu GLM (via ZhipuAI hosted API) ───────────────────────────────────
+    {
+        "provider": "Zhipu AI",
+        "family": "GLM",
+        "model": "glm-4-plus",
+        "display_name": "GLM-4 Plus",
+        "input_per_1m_usd": 0.70,
+        "output_per_1m_usd": 0.70,
+        "context_window_k": 128,
+        "notes": "Flagship GLM-4 from Zhipu AI (CNY pricing converted at ~7.2 CNY/USD)",
+        "source": "https://open.bigmodel.cn/pricing",
+    },
+    {
+        "provider": "Zhipu AI",
+        "family": "GLM",
+        "model": "glm-4",
+        "display_name": "GLM-4",
+        "input_per_1m_usd": 0.14,
+        "output_per_1m_usd": 0.14,
+        "context_window_k": 128,
+        "notes": "Standard GLM-4 (CNY pricing converted at ~7.2 CNY/USD)",
+        "source": "https://open.bigmodel.cn/pricing",
+    },
+    {
+        "provider": "Zhipu AI",
+        "family": "GLM",
+        "model": "glm-4-flash",
+        "display_name": "GLM-4 Flash",
+        "input_per_1m_usd": 0.0,
+        "output_per_1m_usd": 0.0,
+        "context_window_k": 128,
+        "notes": "Free tier model from Zhipu AI",
+        "source": "https://open.bigmodel.cn/pricing",
+    },
+]
+
+def _build_pricing_response() -> dict:
+    """Group the static catalog by provider+family and compute per-1k-token rates."""
+    by_family: dict[str, list] = {}
+    for m in _LLM_PRICING:
+        key = f"{m['provider']} / {m['family']}"
+        entry = {
+            "model": m["model"],
+            "display_name": m["display_name"],
+            "input_per_1m_tokens_usd": m["input_per_1m_usd"],
+            "output_per_1m_tokens_usd": m["output_per_1m_usd"],
+            "input_per_1k_tokens_usd": round(m["input_per_1m_usd"] / 1000, 8),
+            "output_per_1k_tokens_usd": round(m["output_per_1m_usd"] / 1000, 8),
+            "context_window_k": m["context_window_k"],
+            "notes": m.get("notes", ""),
+            "source": m.get("source", ""),
+        }
+        by_family.setdefault(key, []).append(entry)
+
+    families = []
+    for key, models in by_family.items():
+        provider, family = key.split(" / ", 1)
+        families.append({
+            "provider": provider,
+            "family": family,
+            "models": models,
+        })
+
+    return {
+        "as_of": "2025-06-29",
+        "currency": "USD",
+        "note": (
+            "Prices are sourced from public provider pricing pages. "
+            "Llama prices reflect Together AI hosted API rates. "
+            "GLM prices are converted from CNY at ~7.2 CNY/USD. "
+            "Always verify current rates at the source URLs before billing."
+        ),
+        "families": families,
+        "all_models": [
+            {
+                "provider": m["provider"],
+                "family": m["family"],
+                "model": m["model"],
+                "display_name": m["display_name"],
+                "input_per_1m_tokens_usd": m["input_per_1m_usd"],
+                "output_per_1m_tokens_usd": m["output_per_1m_usd"],
+                "input_per_1k_tokens_usd": round(m["input_per_1m_usd"] / 1000, 8),
+                "output_per_1k_tokens_usd": round(m["output_per_1m_usd"] / 1000, 8),
+                "context_window_k": m["context_window_k"],
+                "notes": m.get("notes", ""),
+                "source": m.get("source", ""),
+            }
+            for m in _LLM_PRICING
+        ],
+    }
+
 app = FastAPI(title="Hackathon Contract Agent", version="1.1.0")
 
 app.add_middleware(
@@ -106,11 +393,11 @@ MODEL_RATES = {
     "default":            0.0045,
 }
 
-# Upcharge % bands by service complexity
+# Upcharge % bands by service complexity (5–25% range)
 UPCHARGE_BANDS = {
     "starter":  0.05,   # 5%  — simple, low-risk
-    "standard": 0.10,   # 10% — typical engagement
-    "premium":  0.18,   # 18% — high complexity / priority
+    "standard": 0.12,   # 12% — typical engagement
+    "premium":  0.25,   # 25% — high complexity / priority
 }
 
 
@@ -125,30 +412,44 @@ def _compute_tiers(token_est: int, skill_premium: int, materials: int, model: st
 
     tiers = {}
     for name, cfg in tier_configs.items():
-        base_tokens       = int(token_est * cfg["multiplier"])
+        # token_estimate: assumed cost to complete the agreed deliverable
+        token_estimate    = int(token_est * cfg["multiplier"])
         pct               = upcharge_pct if upcharge_pct is not None else UPCHARGE_BANDS[name]
-        upcharge_tokens   = int(base_tokens * pct)
-        billed_tokens     = base_tokens + upcharge_tokens
+        # clamp premium to 5–25%
+        pct               = max(0.05, min(0.25, pct))
+        upcharge_tokens   = int(token_estimate * pct)
+
+        # price_cap: max tokens user pays to receive agreed deliverable
+        # price_cap must be > token_estimate + followup_budget (followups + estimate = 75% of cap)
+        # So: token_estimate + followup_budget = 0.75 × price_cap
+        # → price_cap = (token_estimate + followup_budget) / 0.75
+        # We derive followup_budget as a fraction of token_estimate (20% default), then solve for cap.
+        followup_budget   = int(token_estimate * 0.20)
+        # price_cap satisfies: estimate + followups = 75% of cap  →  cap = (est + followups) / 0.75
+        price_cap         = int((token_estimate + followup_budget) / 0.75)
+
         sp                = int(skill_premium * cfg["skill_mult"])
-        total_tokens      = billed_tokens + sp + materials
+        total_tokens      = price_cap + sp + materials + upcharge_tokens
         usd_cost          = round(total_tokens * rate_per_1k / 1000, 4)
 
         tiers[name] = {
             "model":            model,
             "rate_per_1k_usd":  rate_per_1k,
-            "base_tokens":      base_tokens,
-            "upcharge_pct":     pct,
-            "upcharge_tokens":  upcharge_tokens,
-            "billed_tokens":    billed_tokens,
+            "token_estimate":   token_estimate,      # assumed cost for the deliverable
+            "followup_budget":  followup_budget,     # tokens reserved for second-round follow-ups
+            "price_cap":        price_cap,           # max tokens to receive agreed deliverable (est+followups = 75% of cap)
+            "upcharge_pct":     pct,                 # premium factor (5–25%)
+            "upcharge_tokens":  upcharge_tokens,     # tokens added as premium upcharge
             "skill_premium":    sp,
             "materials":        materials,
-            "total_tokens":     total_tokens,
+            "total_tokens":     total_tokens,        # price_cap + upcharge + skill_premium + materials
             "total_usd":        usd_cost,
             "revisions":        cfg["revisions"],
             "label":            cfg["label"],
-            # legacy aliases used elsewhere in render
-            "token_est":        base_tokens,
-            "cap":              billed_tokens,
+            # legacy aliases kept for backward compat
+            "base_tokens":      token_estimate,
+            "billed_tokens":    price_cap + upcharge_tokens,
+            "cap":              price_cap,
             "total":            total_tokens,
         }
     return tiers
@@ -280,29 +581,32 @@ human_review_status: "{'required' if r['human_review_required'] else 'not includ
 
 ## 4. Pricing, Budget, and Payment — Token Premium System
 
-The total price uses three layers: raw token/compute usage, materials, and a skill premium.
+The total price uses three layers: token/compute estimate, materials, and a skill premium.
+A **service upcharge** of {int(selected_tier['upcharge_pct']*100)}% (within the 5–25% band) is applied on top of the token estimate.
+
+**Model:** `{selected_tier['model']}` at `{selected_tier['rate_per_1k_usd']} USD per 1,000 tokens`
 
 **Skill premium justification:** {r['skill_premium_justification']}
 
 ### Price components
 
-| Component | Calculation | Tokens | USD (est.) |
+| Component | Definition | Tokens | USD (est.) |
 |---|---|---:|---:|
-| Base compute | `{selected_tier['base_tokens']:,} tokens × {selected_tier['rate_per_1k_usd']} USD/1k` | `{selected_tier['base_tokens']:,}` | `${selected_tier['base_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| Service upcharge ({int(selected_tier['upcharge_pct']*100)}%) | `{selected_tier['base_tokens']:,} × {selected_tier['upcharge_pct']}` | `+{selected_tier['upcharge_tokens']:,}` | `+${selected_tier['upcharge_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Billed tokens (base + upcharge)** | | **`{selected_tier['billed_tokens']:,}`** | **`${selected_tier['billed_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}`** |
+| **Token estimate** | Assumed cost to complete the agreed deliverable | `{selected_tier['token_estimate']:,}` | `${selected_tier['token_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| **Follow-up budget** | Tokens reserved for second-round revisions / clarifications | `{selected_tier['followup_budget']:,}` | `${selected_tier['followup_budget'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| *(estimate + follow-ups)* | Must equal 75% of price cap | `{selected_tier['token_estimate'] + selected_tier['followup_budget']:,}` | — |
+| **Price cap** | Max tokens user pays to receive agreed deliverable | `{selected_tier['price_cap']:,}` | `${selected_tier['price_cap'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| **Service premium ({int(selected_tier['upcharge_pct']*100)}%)** | Upcharge on token estimate (5–25% band; covers infra, reliability, priority) | `+{selected_tier['upcharge_tokens']:,}` | `+${selected_tier['upcharge_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
 | Skill premium | Capability above raw tokens | `+{selected_tier['skill_premium']:,}` | `+${selected_tier['skill_premium'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| Materials / third-party | Licenses, APIs, infra (pre-approval >500 tokens) | `+{r['materials_estimate']:,}` | `+${r['materials_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Total** | `{selected_tier['billed_tokens']:,} + {selected_tier['skill_premium']:,} + {r['materials_estimate']:,}` | **`{selected_tier['total_tokens']:,} tokens`** | **`${selected_tier['total_usd']:.4f}`** |
+| Materials / third-party | Licenses, APIs, infra (pre-approval required >500 tokens) | `+{r['materials_estimate']:,}` | `+${r['materials_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| **Grand total** | price cap + premium + skill + materials | **`{selected_tier['total_tokens']:,} tokens`** | **`${selected_tier['total_usd']:.4f}`** |
 
-- **Model:** `{selected_tier['model']}`
-- **Rate:** `{selected_tier['rate_per_1k_usd']} USD per 1,000 tokens`
-- **Upcharge:** `{int(selected_tier['upcharge_pct']*100)}%` of base compute (covers agent infra, reliability, and priority routing)
-- **Cap:** Not to exceed `{selected_tier['total_tokens']:,} tokens` without an approved change request
+**Pricing invariant:** token estimate + follow-up budget = {selected_tier['token_estimate'] + selected_tier['followup_budget']:,} tokens = 75% of price cap ({selected_tier['price_cap']:,}). Provider cannot exceed the price cap without an approved change request.
 
 ### Payment terms
 
 - **Currency:** `{r['currency']}`
+- **Model:** `{selected_tier['model']}` — `{selected_tier['rate_per_1k_usd']} USD / 1k tokens`
 - **Deposit:** 25% of total on signing (non-refundable once work begins)
 - **Remaining:** On delivery of final accepted deliverable
 - **Payment deadline:** Net 3 calendar days after acceptance
@@ -311,14 +615,21 @@ The total price uses three layers: raw token/compute usage, materials, and a ski
 
 ## 5. Offer Menu
 
-| Option | Model | Base tokens | Upcharge | Upcharge tokens | Billed tokens | Skill premium | Total tokens | Est. USD | Revisions |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| A — Starter | `{tiers['starter']['model']}` | `{tiers['starter']['base_tokens']:,}` | `{int(tiers['starter']['upcharge_pct']*100)}%` | `+{tiers['starter']['upcharge_tokens']:,}` | `{tiers['starter']['billed_tokens']:,}` | `+{tiers['starter']['skill_premium']:,}` | `{tiers['starter']['total_tokens']:,}` | `${tiers['starter']['total_usd']:.4f}` | 1 |
-| B — Standard | `{tiers['standard']['model']}` | `{tiers['standard']['base_tokens']:,}` | `{int(tiers['standard']['upcharge_pct']*100)}%` | `+{tiers['standard']['upcharge_tokens']:,}` | `{tiers['standard']['billed_tokens']:,}` | `+{tiers['standard']['skill_premium']:,}` | `{tiers['standard']['total_tokens']:,}` | `${tiers['standard']['total_usd']:.4f}` | 3 |
-| C — Premium | `{tiers['premium']['model']}` | `{tiers['premium']['base_tokens']:,}` | `{int(tiers['premium']['upcharge_pct']*100)}%` | `+{tiers['premium']['upcharge_tokens']:,}` | `{tiers['premium']['billed_tokens']:,}` | `+{tiers['premium']['skill_premium']:,}` | `{tiers['premium']['total_tokens']:,}` | `${tiers['premium']['total_usd']:.4f}` | 5 |
+| Option | Model | Token estimate | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD | Revisions |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A — Starter | `{tiers['starter']['model']}` | `{tiers['starter']['token_estimate']:,}` | `{tiers['starter']['followup_budget']:,}` | `{tiers['starter']['price_cap']:,}` | `{int(tiers['starter']['upcharge_pct']*100)}%` | `+{tiers['starter']['upcharge_tokens']:,}` | `+{tiers['starter']['skill_premium']:,}` | `{tiers['starter']['total_tokens']:,}` | `${tiers['starter']['total_usd']:.4f}` | 1 |
+| B — Standard | `{tiers['standard']['model']}` | `{tiers['standard']['token_estimate']:,}` | `{tiers['standard']['followup_budget']:,}` | `{tiers['standard']['price_cap']:,}` | `{int(tiers['standard']['upcharge_pct']*100)}%` | `+{tiers['standard']['upcharge_tokens']:,}` | `+{tiers['standard']['skill_premium']:,}` | `{tiers['standard']['total_tokens']:,}` | `${tiers['standard']['total_usd']:.4f}` | 3 |
+| C — Premium | `{tiers['premium']['model']}` | `{tiers['premium']['token_estimate']:,}` | `{tiers['premium']['followup_budget']:,}` | `{tiers['premium']['price_cap']:,}` | `{int(tiers['premium']['upcharge_pct']*100)}%` | `+{tiers['premium']['upcharge_tokens']:,}` | `+{tiers['premium']['skill_premium']:,}` | `{tiers['premium']['total_tokens']:,}` | `${tiers['premium']['total_usd']:.4f}` | 5 |
+
+**Column guide:**
+- **Token estimate** — assumed tokens to complete the deliverable
+- **Follow-ups** — tokens budgeted for second-round revisions (estimate + follow-ups = 75% of price cap)
+- **Price cap** — the hard ceiling the user pays to receive the agreed deliverable
+- **Premium** — service upcharge % (5–25% band)
+- **Est. USD** — dollar cost at `{tiers['standard']['rate_per_1k_usd']} USD/1k tokens`
 
 - **Selected:** `{r['package'].title()}`
-- **Negotiable:** Token estimate, timeline, revision count
+- **Negotiable:** Token estimate, timeline, revision count, premium %
 - **Not negotiable:** Safety constraints, privacy policy, minimum payment
 - **Offer valid until:** `{r['expires_on']}`
 

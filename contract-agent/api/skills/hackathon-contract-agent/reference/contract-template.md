@@ -169,31 +169,42 @@ Each deliverable needs: name, format, due_date, acceptance_criteria, revisions_i
 <!--
 HOW THE TOKEN PREMIUM MODEL WORKS
 ===================================
-The hackathon whiteboard defined three pricing layers:
+Four pricing concepts — understand these before reading the table:
 
-  Layer 1 — Tokens + Platform:  Raw compute cost (LLM calls, API usage, tool calls).
-             Set by token_estimate in your POST body. Capped at estimate × 1.2.
-             Think of this as "what it costs to run the machine."
+  Token estimate:   The assumed token cost to complete the agreed deliverable.
+                    Set via token_estimate in your POST body.
 
-  Layer 2 — Materials:           Third-party licenses, stock, infra costs.
-             Must be pre-approved. Listed per deliverable.
+  Follow-up budget: Tokens reserved for a second round of revisions / clarifications.
+                    Auto-computed as 20% of the token estimate for the selected tier.
 
-  Layer 3 — Skill Premium:       The value of the agent's capability on top of raw tokens.
-             The whiteboard phrase: "X% better than doing it yourself."
-             Set by skill_premium_tokens. This is the negotiable part.
+  Price cap:        The hard maximum the client pays to receive the agreed deliverable.
+                    INVARIANT: token_estimate + follow_up_budget = 75% of price_cap.
+                    Provider cannot exceed the price_cap without an approved change request.
 
-Total cap = (token_estimate × model_rate) + materials_estimate + skill_premium_tokens.
-Provider cannot exceed the cap without a change request.
+  Service premium:  An upcharge on the token estimate, ranging 5–25% depending on tier.
+                    This covers agent infrastructure, reliability, and priority routing.
+                    Set automatically by tier or override with upcharge_pct in POST body.
+
+Plus two fixed layers:
+  Materials:        Third-party licenses, stock, infra costs. Pre-approval required >500 tokens.
+  Skill premium:    Capability value above raw tokens ("X% better than doing it yourself").
+
+Model used: {{MODEL}}
+Rate: {{MODEL_RATE_USD}} USD per 1,000 tokens
 -->
 
 ### Price components
 
-| Component | Basis | Estimated amount | Cap |
-|---|---|---:|---|
-| Token / platform usage | Model + API compute | `{{TOKEN_ESTIMATE}} tokens` | `{{TOKEN_ESTIMATE_CAP}} tokens` (estimate × 1.2) |
-| Materials / third-party | Licenses, stock, infra | `{{MATERIALS_ESTIMATE}}` | Pre-approval required for any item >500 tokens |
-| Skill premium | Capability above raw tokens | `{{SKILL_PREMIUM_TOKENS}} tokens` | Fixed at signing |
-| **Total** | | **`{{TOTAL_TOKEN_COST}} tokens ({{CURRENCY}})`** | **Not to exceed `{{TOTAL_CAP}}` without written approval** |
+| Component | Definition | Tokens | USD (est.) |
+|---|---|---:|---:|
+| **Token estimate** | Assumed cost to complete the agreed deliverable | `{{TOKEN_ESTIMATE}}` | `{{TOKEN_ESTIMATE_USD}}` |
+| **Follow-up budget** | Tokens reserved for second-round revisions | `{{FOLLOWUP_BUDGET}}` | `{{FOLLOWUP_BUDGET_USD}}` |
+| *(estimate + follow-ups)* | Must equal 75% of price cap | `{{EST_PLUS_FOLLOWUP}}` | — |
+| **Price cap** | Max tokens client pays to receive agreed deliverable | `{{PRICE_CAP}}` | `{{PRICE_CAP_USD}}` |
+| **Service premium ({{UPCHARGE_PCT}}%)** | Upcharge on estimate (5–25% band) | `+{{UPCHARGE_TOKENS}}` | `+{{UPCHARGE_USD}}` |
+| Skill premium | Capability above raw tokens | `+{{SKILL_PREMIUM_TOKENS}}` | `+{{SKILL_PREMIUM_USD}}` |
+| Materials / third-party | Licenses, stock, infra (pre-approval >500 tokens) | `+{{MATERIALS_ESTIMATE}}` | `+{{MATERIALS_USD}}` |
+| **Grand total** | price cap + premium + skill + materials | **`{{TOTAL_TOKEN_COST}} tokens`** | **`{{TOTAL_USD}}`** |
 
 **Skill premium justification:**
 The skill premium represents the value of `{{SERVICE_NAME}}` beyond the raw token cost of doing the task manually. Provider estimates this service delivers `{{SKILL_PREMIUM_JUSTIFICATION}}`.
@@ -202,15 +213,16 @@ The skill premium represents the value of `{{SERVICE_NAME}}` beyond the raw toke
 
 <!--
 Tokens are the default currency for agent-to-agent contracts on Nanda Town.
-USD or credits are also accepted — set in currency field of your POST body.
+USD or credits are also accepted — set currency in your POST body.
 -->
 
 - **Currency:** `{{CURRENCY}}`
-- **Deposit:** 25% of total on signing
+- **Model:** `{{MODEL}}` at `{{MODEL_RATE_USD}} USD / 1k tokens`
+- **Deposit:** 25% of total on signing (non-refundable once work begins)
 - **Remaining:** On delivery of final accepted deliverable
 - **Payment deadline:** Net 3 calendar days after acceptance
 - **Late payment:** Work pauses after 2 days written notice on overdue amounts
-- **Budget cap:** Provider may not exceed approved total without an approved change request
+- **Budget cap:** Provider may not exceed price cap without an approved change request
 
 ---
 
@@ -219,16 +231,23 @@ USD or credits are also accepted — set in currency field of your POST body.
 <!--
 AGENT FILLS: Three tiers are auto-generated from your package selection and token_estimate.
 The client agent picks one or proposes a counteroffer.
+
+Column guide:
+  Token estimate  — assumed tokens to complete the deliverable
+  Follow-ups      — tokens for second-round revisions (estimate + follow-ups = 75% of price cap)
+  Price cap       — hard ceiling the client pays to receive the agreed deliverable
+  Premium         — service upcharge % (5–25% band)
+  Est. USD        — dollar cost at the model's blended rate
 -->
 
-| Option | Result | Deliverables | Token estimate | Price cap | Follow-ups |
-|---|---|---|---:|---:|---|
-| A — Starter | Core output only | `{{STARTER_DELIVERABLES}}` | `{{STARTER_TOKEN_EST}}` | `{{STARTER_CAP}}` | 1 |
-| B — Standard | Core + refinements | `{{STANDARD_DELIVERABLES}}` | `{{STANDARD_TOKEN_EST}}` | `{{STANDARD_CAP}}` | 3 |
-| C — Premium | Full scope + priority | `{{PREMIUM_DELIVERABLES}}` | `{{PREMIUM_TOKEN_EST}}` | `{{PREMIUM_CAP}}` | 5 |
+| Option | Model | Token estimate | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD | Revisions |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A — Starter | `{{MODEL}}` | `{{STARTER_TOKEN_EST}}` | `{{STARTER_FOLLOWUP}}` | `{{STARTER_CAP}}` | `{{STARTER_PREMIUM_PCT}}%` | `+{{STARTER_PREMIUM_TOKENS}}` | `+{{STARTER_SKILL}}` | `{{STARTER_TOTAL}}` | `{{STARTER_USD}}` | 1 |
+| B — Standard | `{{MODEL}}` | `{{STANDARD_TOKEN_EST}}` | `{{STANDARD_FOLLOWUP}}` | `{{STANDARD_CAP}}` | `{{STANDARD_PREMIUM_PCT}}%` | `+{{STANDARD_PREMIUM_TOKENS}}` | `+{{STANDARD_SKILL}}` | `{{STANDARD_TOTAL}}` | `{{STANDARD_USD}}` | 3 |
+| C — Premium | `{{MODEL}}` | `{{PREMIUM_TOKEN_EST}}` | `{{PREMIUM_FOLLOWUP}}` | `{{PREMIUM_CAP}}` | `{{PREMIUM_PREMIUM_PCT}}%` | `+{{PREMIUM_PREMIUM_TOKENS}}` | `+{{PREMIUM_SKILL}}` | `{{PREMIUM_TOTAL}}` | `{{PREMIUM_USD}}` | 5 |
 
 - **Selected option:** `{{PACKAGE}}`
-- **Negotiable:** Token estimate, timeline, revision count
+- **Negotiable:** Token estimate, timeline, revision count, premium % (5–25%)
 - **Not negotiable:** Safety constraints, privacy policy, minimum payment, excluded work
 - **Offer valid until:** `{{OFFER_VALID_UNTIL}}`
 

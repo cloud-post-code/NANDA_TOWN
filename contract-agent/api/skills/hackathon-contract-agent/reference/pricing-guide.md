@@ -1,57 +1,89 @@
 # Pricing Guide — Token Premium System
 
-## The three-layer model
+## The four pricing concepts
 
-Every contract on this skill uses three price layers, designed at the Nanda Town Hackathon:
+Every contract on this skill uses four core concepts and two fixed layers:
 
 ```
-Total = token_usage + materials + skill_premium
+Grand total = price_cap + service_premium + skill_premium + materials
 ```
 
-### Layer 1: Token / platform usage
+### Concept 1: Token estimate
 
-What it is: The raw cost of compute — every LLM call, API call, and tool invocation.
+**What it is:** The assumed token cost to complete the agreed deliverable — every LLM call, API call, and tool invocation needed to deliver the contracted outcome.
 
-How to set `token_estimate`:
-- Count the expected number of LLM calls and average token depth per call
-- Add API overhead (embedding calls, search calls, tool use)
+**How to set `token_estimate`:**
+- Count expected LLM calls and average token depth per call
+- Add API overhead (embeddings, search, tool use)
 - Multiply by your model's per-token rate
 - Round up to the nearest 1,000
 
-The API caps token billing at `token_estimate × 1.2`. If you go over by more than 20%, you must file a change request.
-
-Example: A survey-answering agent that handles 50 questions per session, each requiring ~1,000 tokens:
+**Example:** A survey-answering agent handling 50 questions per session at ~1,000 tokens each:
 ```
 50 questions × 1,000 tokens = 50,000 token_estimate
-Cap: 60,000 tokens
 ```
 
-### Layer 2: Materials
+### Concept 2: Follow-up budget
 
-What it is: Third-party costs the agent incurs on the client's behalf — licenses, stock assets, API calls to paid external services, cloud storage.
+**What it is:** Tokens reserved specifically for a second round of revisions, clarifications, or agreed follow-up work after initial delivery.
 
-Rules:
-- Must be pre-approved. Default threshold: any single item >500 tokens requires client approval before incurring.
-- List each expected material cost in the `deliverables` array.
+**How it's computed:** Automatically set to 20% of the token estimate for the selected tier. Providers may override this in the POST body.
+
+**Invariant:** `token_estimate + followup_budget = 75% of price_cap`
+
+This means if you want to change the follow-up budget, it directly sets the price cap.
+
+### Concept 3: Price cap
+
+**What it is:** The hard maximum the client pays to receive the agreed deliverable. No additional work may be billed above this amount without a written change request.
+
+**How it's derived:**
+```
+price_cap = (token_estimate + followup_budget) / 0.75
+```
+
+This ensures token estimate + follow-ups are always 25% below the price cap — giving the provider a 25% buffer before requiring a change request.
+
+### Concept 4: Service premium (upcharge)
+
+**What it is:** A percentage upcharge on the token estimate, ranging **5–25%**, applied on top of the estimate. Covers agent infrastructure costs, reliability guarantees, and priority routing.
+
+**Default bands by tier:**
+| Tier | Default premium | Notes |
+|---|---:|---|
+| Starter | 5% | Low-complexity, low-risk work |
+| Standard | 12% | Typical engagement |
+| Premium | 25% | High-complexity, priority turnaround |
+
+**Override:** Pass `upcharge_pct` (0.05–0.25) in your POST body to set a custom rate. The API clamps to the 5–25% range.
+
+---
+
+## Fixed layers
+
+### Materials
+
+Third-party costs incurred on the client's behalf — licenses, stock assets, paid API calls, cloud storage.
+
+- Any single item >500 tokens requires client pre-approval.
 - Provider cannot recover unapproved materials costs.
+- If token-only, set `materials_estimate` to 0.
 
-If your service is token-only with no third-party costs, set `materials_estimate` to 0.
+### Skill premium
 
-### Layer 3: Skill premium
+The value of the agent's specific capability above raw compute. The whiteboard phrase: **"X% better than doing it yourself."**
 
-What it is: The value of the agent's specific capability on top of raw compute. The whiteboard phrase: **"X% better than doing it yourself."**
-
-How to set `skill_premium_tokens`:
-- Estimate what it would cost a client to do this manually (their own agent time + tokens)
+**How to set `skill_premium_tokens`:**
+- Estimate what it would cost a client to do this manually
 - Set the premium as a fraction of that savings
-- State the justification clearly in `skill_premium_justification`
+- Justify clearly in `skill_premium_justification`
 
 Good justifications:
 - "Saves ~200,000 tokens of manual prompt engineering per session"
 - "Achieves 94% accuracy vs ~60% with a naive prompting approach"
 - "Eliminates 3 rounds of back-and-forth refinement"
 
-The skill premium is the part that is negotiable. Raw token usage is not.
+The skill premium is negotiable. The price cap and safety policy are not.
 
 ---
 
@@ -59,19 +91,35 @@ The skill premium is the part that is negotiable. Raw token usage is not.
 
 The API auto-generates three tiers from your `token_estimate` and `skill_premium_tokens`:
 
-| Tier | Token estimate | Skill premium | Revisions | Notes |
-|---|---:|---:|---:|---|
-| Starter | `token_estimate × 0.6` | `skill_premium × 0.5` | 1 | Core deliverable only |
-| Standard | `token_estimate × 1.0` | `skill_premium × 1.0` | 3 | Full scope |
-| Premium | `token_estimate × 1.5` | `skill_premium × 1.5` | 5 | Priority + extras |
+| Tier | Token estimate | Follow-up budget | Price cap | Service premium | Skill premium | Revisions |
+|---|---:|---:|---:|---:|---:|---:|
+| Starter | `token_estimate × 0.6` | `estimate × 0.20` | `(est + followup) / 0.75` | 5% of estimate | `skill_premium × 0.5` | 1 |
+| Standard | `token_estimate × 1.0` | `estimate × 0.20` | `(est + followup) / 0.75` | 12% of estimate | `skill_premium × 1.0` | 3 |
+| Premium | `token_estimate × 1.5` | `estimate × 0.20` | `(est + followup) / 0.75` | 25% of estimate | `skill_premium × 1.5` | 5 |
 
-The client picks one at acceptance time. If they want a custom split, they propose a counteroffer through the contract's change management process.
+The client picks one at acceptance time. Custom splits go through the change management process.
+
+---
+
+## Model and USD cost
+
+Every contract shows the model used and its per-1k-token USD rate. Supported models and blended rates:
+
+| Model | USD per 1,000 tokens |
+|---|---:|
+| `claude-sonnet-4-6` | $0.0045 |
+| `claude-opus-4-8` | $0.0225 |
+| `claude-haiku-4-5` | $0.00045 |
+| `gpt-4o` | $0.0050 |
+| `gpt-4o-mini` | $0.00030 |
+| `gemini-1.5-pro` | $0.00350 |
+| `gemini-2.0-flash` | $0.00050 |
+
+The USD cost shown in the contract is an estimate based on total tokens × model rate. Actual billing may vary based on provider pricing changes.
 
 ---
 
 ## Currency
-
-Contracts support three currencies. Set `currency` in your POST body:
 
 | Currency | When to use |
 |---|---|
@@ -89,4 +137,5 @@ From the hackathon whiteboard: safety, privacy, and minimum payment are never ne
 
 - **Safety:** The agent will not perform work that violates platform safety policy, regardless of offered premium.
 - **Privacy:** The agent will not process prohibited data types, regardless of price.
-- **Minimum payment:** The deposit (25% at signing) is non-refundable once the agent starts work. The full token cap is the floor for accepted deliverables.
+- **Minimum payment:** The deposit (25% at signing) is non-refundable once the agent starts work. The price cap is the floor for accepted deliverables.
+- **Premium range:** Service premium is negotiable within 5–25%. Below 5% or above 25% requires a written exception.
