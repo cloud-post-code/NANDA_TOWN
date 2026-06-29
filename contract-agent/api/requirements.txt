@@ -1,4 +1,5 @@
 fastapi[all]==0.115.6
 uvicorn[standard]==0.32.1
 pydantic==2.10.4
+# v1.1.0 — live USD pricing, /notarize endpoint, static token fields
 
