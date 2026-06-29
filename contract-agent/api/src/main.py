@@ -765,9 +765,12 @@ def notarize_contract(contract_id: str):
     import base64
     import jcs as _jcs
 
+    # The notary schema requires runtime to match ^[a-z0-9-]+$ — lowercase our ID
+    notary_runtime = contract_id.lower()
+
     payload_dict = {
         "schema_version":    1,
-        "runtime":           contract_id,
+        "runtime":           notary_runtime,
         "protocol_versions": ["0.3"],
         "suite_digest":      f"sha256:{contract['contract_hash']}",
         "completed_at":      now_iso,
@@ -792,9 +795,11 @@ def notarize_contract(contract_id: str):
     notary_resp  = None
     notary_error = None
 
+    # Try /register first (most reliable); /countersign returns 500 on the notary
+    # when the badge passes verification but has no prior run record.
     for endpoint, body in [
-        ("/countersign", {"badge": badge, "method": "lab"}),
         ("/register",    {"badge": badge}),
+        ("/countersign", {"badge": badge, "method": "lab"}),
     ]:
         try:
             payload = json.dumps(body).encode()
@@ -846,7 +851,8 @@ def notarize_contract(contract_id: str):
         "notary_did_key":      did_key,
         "notary_method":       method,
         "contract_url":        contract_url,
-        "notary_inspect_url":  f"{NOTARY_BASE}/inspect?runtime={contract_id}",
+        # Notary stores by the lowercase runtime ID
+        "notary_inspect_url":  f"{NOTARY_BASE}/inspect?runtime={notary_runtime}",
     }
 
 
