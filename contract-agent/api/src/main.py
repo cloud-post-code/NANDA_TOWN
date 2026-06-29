@@ -1,16 +1,13 @@
-import base64
 import hashlib
-import json
 import os
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
 app = FastAPI(title="Hackathon Contract Agent", version="1.0.0")
@@ -25,44 +22,17 @@ app.add_middleware(
 NOTARY_BASE = "https://town-notary-production.up.railway.app"
 SELF_BASE = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
 
-# Generate (or load) a persistent Ed25519 keypair for badge signing
-_KEY_PATH = Path("/tmp/agent_ed25519.key")
+# Stable agent identifier — persisted in /tmp across restarts within a deployment
+_ID_PATH = Path("/tmp/agent_id.txt")
 
-def _load_or_create_keypair() -> tuple[Ed25519PrivateKey, str]:
-    if _KEY_PATH.exists():
-        raw = base64.b64decode(_KEY_PATH.read_bytes())
-        private_key = Ed25519PrivateKey.from_private_bytes(raw)
-    else:
-        private_key = Ed25519PrivateKey.generate()
-        raw = private_key.private_bytes_raw()
-        _KEY_PATH.write_bytes(base64.b64encode(raw))
-    pub = private_key.public_key().public_bytes_raw()
-    # did:key uses multicodec prefix 0xed01 for Ed25519
-    multicodec = bytes([0xed, 0x01]) + pub
-    did_key = "did:key:z" + base64.b58encode(multicodec).decode()
-    return private_key, did_key
+def _load_or_create_agent_id() -> str:
+    if _ID_PATH.exists():
+        return _ID_PATH.read_text().strip()
+    agent_id = f"urn:uuid:{uuid.uuid4()}"
+    _ID_PATH.write_text(agent_id)
+    return agent_id
 
-_PRIVATE_KEY, _AGENT_DID = _load_or_create_keypair()
-
-
-def _sign_badge(contract_id: str, contract_hash: str) -> dict:
-    payload = {
-        "runtime": contract_id,
-        "suite_digest": f"sha256:{contract_hash}",
-        "protocol_versions": ["0.2"],
-        "counts": {"passed": 1, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0},
-        "completed_at": datetime.utcnow().isoformat() + "Z",
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    sig = _PRIVATE_KEY.sign(canonical)
-    signed_at = datetime.utcnow().isoformat() + "Z"
-    return {
-        "payload": payload,
-        "signature": base64.b64encode(sig).decode(),
-        "signed_by": _AGENT_DID,
-        "signer_did": _AGENT_DID,
-        "signed_at": signed_at,
-    }
+_AGENT_ID = _load_or_create_agent_id()
 
 
 # In-memory store (replace with a DB for production)
@@ -441,7 +411,7 @@ def root():
         "service": "Hackathon Contract Agent",
         "version": "1.0.0",
         "docs": "/docs",
-        "agent_did": _AGENT_DID,
+        "agent_did": _AGENT_ID,
         "skill": f"{SELF_BASE}/skill.md",
     }
 
@@ -656,7 +626,7 @@ def agent_card():
     return {
         "name": "Hackathon Contract Agent",
         "version": "1.0.0",
-        "did": _AGENT_DID,
+        "did": _AGENT_ID,
         "base_url": SELF_BASE,
         "skill_url": f"{SELF_BASE}/skill.md",
         "description": "Generates, prices, and exposes A2A service contracts with token-premium pricing. Town Notary countersignature is handled by parties directly per Section 12 of each contract.",
