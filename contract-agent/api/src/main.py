@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import uuid
 import urllib.request
 import urllib.error
 from datetime import date, datetime, timedelta
