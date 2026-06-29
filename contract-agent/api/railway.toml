@@ -1,12 +1,9 @@
 [build]
 builder = "dockerfile"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "../Dockerfile"
+watchPatterns = ["api/**", "skills/**", "Dockerfile"]
 
 [deploy]
-startCommand = "uvicorn src.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
-
-[[services]]
-name = "hackathon-contract-agent"
