@@ -380,7 +380,8 @@ def _render_contract(data: dict) -> str:
     r = data
     tiers = r["tiers"]
     pkg = r["package"].lower()
-    st = tiers.get(pkg, tiers["standard"])   # selected tier (token fields only)
+    # st is only used in token mode — safe default for per-call mode
+    st = tiers.get(pkg, tiers.get("standard", {})) if tiers else {}
 
     # ── Live rate lookup ───────────────────────────────────────────────────────
     rate, is_live = _fetch_live_rate(r["model"])
