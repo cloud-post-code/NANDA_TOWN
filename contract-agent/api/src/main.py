@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-app = FastAPI(title="Hackathon Contract Agent", version="1.0.0")
+app = FastAPI(title="Hackathon Contract Agent", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
