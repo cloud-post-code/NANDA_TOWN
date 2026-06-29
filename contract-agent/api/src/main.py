@@ -393,7 +393,7 @@ def root():
 
 @app.get("/skill.md", response_class=PlainTextResponse)
 def serve_skill_md():
-    skill_path = Path(__file__).parent.parent.parent / "skills" / "hackathon-contract-agent" / "SKILL.md"
+    skill_path = Path(__file__).parent.parent / "skills" / "hackathon-contract-agent" / "SKILL.md"
     if skill_path.exists():
         return skill_path.read_text()
     return "SKILL.md not found — see GitHub repo"
