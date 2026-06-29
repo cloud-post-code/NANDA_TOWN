@@ -73,9 +73,11 @@ class GenerateRequest(BaseModel):
     in_scope: list[str]
     out_of_scope: list[str] = []
     deliverables: list[Deliverable]
+    model: str = "claude-sonnet-4-6"
     token_estimate: int
     skill_premium_tokens: int
     skill_premium_justification: str = "Saves manual prompt engineering effort"
+    upcharge_pct: float | None = None  # 0.05–0.20; auto-set from tier if None
     materials_estimate: int = 0
     currency: str = "tokens"
     ip_model: str = "client_ownership"
@@ -92,34 +94,63 @@ class AcceptRequest(BaseModel):
 
 # ── Pricing helpers ───────────────────────────────────────────────────────────
 
-MODEL_RATE = 0.000003  # $0.000003 per token (approximate mid-tier rate)
+# Per-model token rates (USD per 1k tokens, blended input+output estimate)
+MODEL_RATES = {
+    "claude-sonnet-4-6":  0.0045,
+    "claude-opus-4-8":    0.0225,
+    "claude-haiku-4-5":   0.00045,
+    "gpt-4o":             0.005,
+    "gpt-4o-mini":        0.00030,
+    "gemini-1.5-pro":     0.00350,
+    "gemini-2.0-flash":   0.00050,
+    "default":            0.0045,
+}
 
-def _compute_tiers(token_est: int, skill_premium: int, materials: int):
-    tiers = {
-        "starter": {
-            "token_est": int(token_est * 0.6),
-            "cap": int(token_est * 0.6 * 1.2),
-            "skill_premium": int(skill_premium * 0.5),
-            "revisions": 1,
-            "deliverables": "Core deliverable only",
-        },
-        "standard": {
-            "token_est": token_est,
-            "cap": int(token_est * 1.2),
-            "skill_premium": skill_premium,
-            "revisions": 3,
-            "deliverables": "Core + follow-up refinements",
-        },
-        "premium": {
-            "token_est": int(token_est * 1.5),
-            "cap": int(token_est * 1.5 * 1.2),
-            "skill_premium": int(skill_premium * 1.5),
-            "revisions": 5,
-            "deliverables": "Full scope + priority turnaround",
-        },
+# Upcharge % bands by service complexity
+UPCHARGE_BANDS = {
+    "starter":  0.05,   # 5%  — simple, low-risk
+    "standard": 0.10,   # 10% — typical engagement
+    "premium":  0.18,   # 18% — high complexity / priority
+}
+
+
+def _compute_tiers(token_est: int, skill_premium: int, materials: int, model: str, upcharge_pct: float | None):
+    rate_per_1k = MODEL_RATES.get(model, MODEL_RATES["default"])
+
+    tier_configs = {
+        "starter":  {"multiplier": 0.6,  "skill_mult": 0.5,  "revisions": 1, "label": "Core deliverable only"},
+        "standard": {"multiplier": 1.0,  "skill_mult": 1.0,  "revisions": 3, "label": "Core + follow-up refinements"},
+        "premium":  {"multiplier": 1.5,  "skill_mult": 1.5,  "revisions": 5, "label": "Full scope + priority turnaround"},
     }
-    for t in tiers.values():
-        t["total"] = t["token_est"] + t["skill_premium"] + materials
+
+    tiers = {}
+    for name, cfg in tier_configs.items():
+        base_tokens       = int(token_est * cfg["multiplier"])
+        pct               = upcharge_pct if upcharge_pct is not None else UPCHARGE_BANDS[name]
+        upcharge_tokens   = int(base_tokens * pct)
+        billed_tokens     = base_tokens + upcharge_tokens
+        sp                = int(skill_premium * cfg["skill_mult"])
+        total_tokens      = billed_tokens + sp + materials
+        usd_cost          = round(total_tokens * rate_per_1k / 1000, 4)
+
+        tiers[name] = {
+            "model":            model,
+            "rate_per_1k_usd":  rate_per_1k,
+            "base_tokens":      base_tokens,
+            "upcharge_pct":     pct,
+            "upcharge_tokens":  upcharge_tokens,
+            "billed_tokens":    billed_tokens,
+            "skill_premium":    sp,
+            "materials":        materials,
+            "total_tokens":     total_tokens,
+            "total_usd":        usd_cost,
+            "revisions":        cfg["revisions"],
+            "label":            cfg["label"],
+            # legacy aliases used elsewhere in render
+            "token_est":        base_tokens,
+            "cap":              billed_tokens,
+            "total":            total_tokens,
+        }
     return tiers
 
 
@@ -255,12 +286,19 @@ The total price uses three layers: raw token/compute usage, materials, and a ski
 
 ### Price components
 
-| Component | Basis | Estimated amount | Cap |
-|---|---|---:|---|
-| Token / platform usage | Model + API compute | `{selected_tier['token_est']:,} tokens` | `{selected_tier['cap']:,} tokens` |
-| Materials / third-party | Licenses, APIs, infra | `{r['materials_estimate']:,} tokens` | Pre-approval required >500 tokens |
-| Skill premium | Capability above raw tokens | `{selected_tier['skill_premium']:,} tokens` | Fixed at signing |
-| **Total** | | **`{selected_tier['total']:,} {r['currency']}`** | **Not to exceed `{selected_tier['cap'] + selected_tier['skill_premium'] + r['materials_estimate']:,}` without approval** |
+| Component | Calculation | Tokens | USD (est.) |
+|---|---|---:|---:|
+| Base compute | `{selected_tier['base_tokens']:,} tokens × {selected_tier['rate_per_1k_usd']} USD/1k` | `{selected_tier['base_tokens']:,}` | `${selected_tier['base_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| Service upcharge ({int(selected_tier['upcharge_pct']*100)}%) | `{selected_tier['base_tokens']:,} × {selected_tier['upcharge_pct']}` | `+{selected_tier['upcharge_tokens']:,}` | `+${selected_tier['upcharge_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| **Billed tokens (base + upcharge)** | | **`{selected_tier['billed_tokens']:,}`** | **`${selected_tier['billed_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}`** |
+| Skill premium | Capability above raw tokens | `+{selected_tier['skill_premium']:,}` | `+${selected_tier['skill_premium'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| Materials / third-party | Licenses, APIs, infra (pre-approval >500 tokens) | `+{r['materials_estimate']:,}` | `+${r['materials_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
+| **Total** | `{selected_tier['billed_tokens']:,} + {selected_tier['skill_premium']:,} + {r['materials_estimate']:,}` | **`{selected_tier['total_tokens']:,} tokens`** | **`${selected_tier['total_usd']:.4f}`** |
+
+- **Model:** `{selected_tier['model']}`
+- **Rate:** `{selected_tier['rate_per_1k_usd']} USD per 1,000 tokens`
+- **Upcharge:** `{int(selected_tier['upcharge_pct']*100)}%` of base compute (covers agent infra, reliability, and priority routing)
+- **Cap:** Not to exceed `{selected_tier['total_tokens']:,} tokens` without an approved change request
 
 ### Payment terms
 
@@ -273,11 +311,11 @@ The total price uses three layers: raw token/compute usage, materials, and a ski
 
 ## 5. Offer Menu
 
-| Option | Result | Token estimate | Price cap | Revisions |
-|---|---|---:|---:|---:|
-| A — Starter | Core deliverable only | `{tiers['starter']['token_est']:,}` | `{tiers['starter']['total']:,}` | 1 |
-| B — Standard | Core + refinements | `{tiers['standard']['token_est']:,}` | `{tiers['standard']['total']:,}` | 3 |
-| C — Premium | Full scope + priority | `{tiers['premium']['token_est']:,}` | `{tiers['premium']['total']:,}` | 5 |
+| Option | Model | Base tokens | Upcharge | Upcharge tokens | Billed tokens | Skill premium | Total tokens | Est. USD | Revisions |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A — Starter | `{tiers['starter']['model']}` | `{tiers['starter']['base_tokens']:,}` | `{int(tiers['starter']['upcharge_pct']*100)}%` | `+{tiers['starter']['upcharge_tokens']:,}` | `{tiers['starter']['billed_tokens']:,}` | `+{tiers['starter']['skill_premium']:,}` | `{tiers['starter']['total_tokens']:,}` | `${tiers['starter']['total_usd']:.4f}` | 1 |
+| B — Standard | `{tiers['standard']['model']}` | `{tiers['standard']['base_tokens']:,}` | `{int(tiers['standard']['upcharge_pct']*100)}%` | `+{tiers['standard']['upcharge_tokens']:,}` | `{tiers['standard']['billed_tokens']:,}` | `+{tiers['standard']['skill_premium']:,}` | `{tiers['standard']['total_tokens']:,}` | `${tiers['standard']['total_usd']:.4f}` | 3 |
+| C — Premium | `{tiers['premium']['model']}` | `{tiers['premium']['base_tokens']:,}` | `{int(tiers['premium']['upcharge_pct']*100)}%` | `+{tiers['premium']['upcharge_tokens']:,}` | `{tiers['premium']['billed_tokens']:,}` | `+{tiers['premium']['skill_premium']:,}` | `{tiers['premium']['total_tokens']:,}` | `${tiers['premium']['total_usd']:.4f}` | 5 |
 
 - **Selected:** `{r['package'].title()}`
 - **Negotiable:** Token estimate, timeline, revision count
@@ -447,7 +485,7 @@ def generate_contract(req: GenerateRequest):
     expires_on = (date.today() + timedelta(days=30)).isoformat()
     target_delivery = (date.today() + timedelta(days=14)).isoformat()
 
-    tiers = _compute_tiers(req.token_estimate, req.skill_premium_tokens, req.materials_estimate)
+    tiers = _compute_tiers(req.token_estimate, req.skill_premium_tokens, req.materials_estimate, req.model, req.upcharge_pct)
 
     data: dict[str, Any] = {
         "contract_id": contract_id,
@@ -469,6 +507,8 @@ def generate_contract(req: GenerateRequest):
         "in_scope": req.in_scope,
         "out_of_scope": req.out_of_scope,
         "deliverables": [d.model_dump() for d in req.deliverables],
+        "model": req.model,
+        "upcharge_pct": req.upcharge_pct,
         "token_estimate": req.token_estimate,
         "skill_premium_tokens": req.skill_premium_tokens,
         "skill_premium_justification": req.skill_premium_justification,
