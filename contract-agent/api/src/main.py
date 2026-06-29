@@ -16,7 +16,6 @@ import base64
 import hashlib
 import json
 import os
-import uuid
 import urllib.request
 import urllib.error
 from datetime import date, datetime, timedelta
@@ -24,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
@@ -43,52 +41,42 @@ NOTARY_BASE        = "https://town-notary-production.up.railway.app"
 SELF_BASE          = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
 PRICING_SCRAPER_BASE = os.getenv("PRICING_SCRAPER_URL", "https://pricing-scraper-production.up.railway.app")
 
-_ID_PATH  = Path("/tmp/agent_id.txt")
-_KEY_PATH = Path("/tmp/agent_ed25519_seed.bin")
+_ID_PATH   = Path("/tmp/agent_id.txt")
+_SEED_PATH = Path("/tmp/agent_ed25519_seed.bin")
 
-# base58btc alphabet (Bitcoin)
-_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+def _load_or_create_seed() -> bytes:
+    if _SEED_PATH.exists():
+        return _SEED_PATH.read_bytes()
+    seed = os.urandom(32)
+    _SEED_PATH.write_bytes(seed)
+    return seed
+
+
+_AGENT_SEED    = _load_or_create_seed()
+_AGENT_PRIVKEY = Ed25519PrivateKey.from_private_bytes(_AGENT_SEED)
+_AGENT_PUBKEY  = _AGENT_PRIVKEY.public_key().public_bytes_raw()
+
+# Encode public key as did:key using multicodec Ed25519 prefix + base58btc
+_B58_CHARS = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 def _b58encode(data: bytes) -> str:
     n = int.from_bytes(data, "big")
     result = []
     while n:
         n, r = divmod(n, 58)
-        result.append(_B58_ALPHABET[r])
+        result.append(_B58_CHARS[r])
     for b in data:
-        if b == 0:
-            result.append(_B58_ALPHABET[0])
-        else:
-            break
+        if b == 0: result.append(_B58_CHARS[0])
+        else: break
     return "".join(reversed(result))
 
-
-def _load_or_create_signing_key() -> tuple[Ed25519PrivateKey, str, str]:
-    """
-    Return (private_key, did_key, pubkey_hex).
-    Seed is persisted to /tmp so it survives process restarts within a deployment.
-    """
-    if _KEY_PATH.exists():
-        seed = _KEY_PATH.read_bytes()
-    else:
-        seed = os.urandom(32)
-        _KEY_PATH.write_bytes(seed)
-
-    privkey  = Ed25519PrivateKey.from_private_bytes(seed)
-    pubkey   = privkey.public_key().public_bytes_raw()
-    # Ed25519 multicodec prefix = 0xed 0x01
-    multicodec = bytes([0xed, 0x01]) + pubkey
-    did_key  = "did:key:z" + _b58encode(multicodec)
-    return privkey, did_key, pubkey.hex()
-
-
-_AGENT_PRIVKEY, _AGENT_DID_KEY, _AGENT_PUBKEY_HEX = _load_or_create_signing_key()
+_AGENT_DID_KEY = "did:key:z" + _b58encode(bytes([0xed, 0x01]) + _AGENT_PUBKEY)
 
 
 def _load_or_create_agent_id() -> str:
     if _ID_PATH.exists():
         return _ID_PATH.read_text().strip()
-    # Use the did:key as the stable agent identifier
     _ID_PATH.write_text(_AGENT_DID_KEY)
     return _AGENT_DID_KEY
 
@@ -762,21 +750,36 @@ def notarize_contract(contract_id: str):
     now_iso      = datetime.utcnow().isoformat() + "Z"
 
     # Build a properly signed sm-conformance badge envelope.
-    # The Town Notary validates the Ed25519 signature over the canonical payload JSON.
+    # The Town Notary runs verify_envelope() which:
+    #   1. checks all required fields exist
+    #   2. derives pubkey from signed_by did:key
+    #   3. decodes signature from base64
+    #   4. verifies Ed25519(pubkey, jcs.canonicalize(payload))
+    #   5. validates the envelope against conformance-envelope.schema.json
+    #
+    # Required payload fields per the schema:
+    #   schema_version (int=1), runtime (str), protocol_versions (list[str]),
+    #   suite_digest (str), completed_at (str), exit_status (int),
+    #   passed/failed/skipped/xfailed/xpassed (top-level ints, NOT nested in counts)
+    import base64
+    import jcs as _jcs
+
     payload_dict = {
-        "runtime":      contract_id,
-        "suite_digest": f"sha256:{contract['contract_hash']}",
-        "completed_at": now_iso,
-        "counts": {"passed": 1, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0},
-        "certified": True,
-        "contract_url":  contract_url,
-        "contract_hash": contract["contract_hash"],
+        "schema_version":    1,
+        "runtime":           contract_id,
+        "protocol_versions": ["0.3"],
+        "suite_digest":      f"sha256:{contract['contract_hash']}",
+        "completed_at":      now_iso,
+        "exit_status":       0,
+        "passed":            1,
+        "failed":            0,
+        "skipped":           0,
+        "xfailed":           0,
+        "xpassed":           0,
     }
-    # Canonical JSON: sorted keys, no spaces (matches sm-conformance convention)
-    payload_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode()
-    sig_bytes     = _AGENT_PRIVKEY.sign(payload_bytes)
-    # Notary expects base64 (standard, with padding) — not hex, not base64url
-    sig_b64 = base64.b64encode(sig_bytes).decode()
+    canonical_bytes = _jcs.canonicalize(payload_dict)
+    sig_bytes       = _AGENT_PRIVKEY.sign(canonical_bytes)
+    sig_b64         = base64.b64encode(sig_bytes).decode("ascii")
 
     badge = {
         "payload":   payload_dict,
