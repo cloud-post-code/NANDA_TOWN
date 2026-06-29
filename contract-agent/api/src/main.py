@@ -105,6 +105,25 @@ class Questions(BaseModel):
     appropriation_policy: str = "Client owns custom deliverables on full payment"
 
 
+class CallBundle(BaseModel):
+    """A prepaid bundle of API calls at a discounted per-call rate."""
+    name: str                      # e.g. "Starter Pack", "Growth Bundle"
+    calls: int                     # number of calls included
+    price_usd: float               # total bundle price (flat, agreed at signing)
+    per_call_usd: float            # effective per-call rate (price_usd / calls)
+    overage_per_call_usd: float    # rate for calls beyond bundle (must be >= per_call_usd)
+    validity_days: int = 90        # bundle expires N days after signing
+
+
+class PerCallTier(BaseModel):
+    """One tier in a per-call pricing menu."""
+    name: str                      # e.g. "Pay-as-you-go", "Standard", "Enterprise"
+    per_call_usd: float            # fixed price per API call for this tier
+    call_limit: int | None = None  # max calls/month; None = unlimited
+    features: list[str] = []       # what's included (e.g. "priority queue", "SLA 99.9%")
+    bundle: CallBundle | None = None  # optional prepaid bundle for this tier
+
+
 class GenerateRequest(BaseModel):
     service_name: str
     provider_agent: str
@@ -121,12 +140,20 @@ class GenerateRequest(BaseModel):
     out_of_scope: list[str] = []
     deliverables: list[Deliverable]
     model: str = "claude-sonnet-4-6"
-    token_estimate: int
-    skill_premium_tokens: int
+    # ── Pricing mode ──────────────────────────────────────────────────────────
+    # "token"    → existing token-premium system (token_estimate required)
+    # "per_call" → fixed price per API call (per_call_tiers required)
+    pricing_mode: str = "token"
+    # ── Token pricing fields (pricing_mode == "token") ────────────────────────
+    token_estimate: int = 0
+    skill_premium_tokens: int = 0
     skill_premium_justification: str = "Saves manual prompt engineering effort"
-    upcharge_pct: float | None = None  # 0.05–0.25; auto-set from tier if None
+    upcharge_pct: float | None = None
     materials_estimate: int = 0
-    currency: str = "tokens"
+    # ── Per-call pricing fields (pricing_mode == "per_call") ─────────────────
+    per_call_tiers: list[PerCallTier] = []
+    # ─────────────────────────────────────────────────────────────────────────
+    currency: str = "USD"
     ip_model: str = "client_ownership"
     human_review_required: bool = True
     governing_jurisdiction: str = "California, USA"
@@ -244,6 +271,105 @@ def _live_usd(tokens: int, rate_per_1k: float) -> float:
     return round(tokens * rate_per_1k / 1000, 4)
 
 
+def _render_per_call_section(r: dict) -> str:
+    """Render Section 4 for pricing_mode == 'per_call'."""
+    tiers: list[dict] = r.get("per_call_tiers", [])
+    pkg = r["package"].lower()
+
+    # Find the selected tier (match by name case-insensitive, fall back to first)
+    selected = next(
+        (t for t in tiers if t["name"].lower() == pkg or t["name"].lower().startswith(pkg)),
+        tiers[0] if tiers else None,
+    )
+
+    # Build tiers table
+    tier_rows = []
+    for t in tiers:
+        limit = f"{t['call_limit']:,}/mo" if t.get("call_limit") else "unlimited"
+        features = "; ".join(t.get("features", [])) or "—"
+        tier_rows.append(
+            f"| `{t['name']}` | `${t['per_call_usd']:.4f}` | `{limit}` | {features} |"
+        )
+    tier_table = "\n".join(tier_rows) if tier_rows else "| *(no tiers defined)* | | | |"
+
+    # Build bundles table
+    bundle_rows = []
+    for t in tiers:
+        b = t.get("bundle")
+        if b:
+            savings = round((1 - b["per_call_usd"] / t["per_call_usd"]) * 100, 1) if t["per_call_usd"] > 0 else 0
+            bundle_rows.append(
+                f"| `{b['name']}` | `{b['calls']:,}` | `${b['price_usd']:.2f}` "
+                f"| `${b['per_call_usd']:.4f}` | `${b['overage_per_call_usd']:.4f}` "
+                f"| {savings}% savings | {b.get('validity_days', 90)} days |"
+            )
+    bundle_section = ""
+    if bundle_rows:
+        bundle_table = "\n".join(bundle_rows)
+        bundle_section = f"""
+### Bundle options (prepaid call packs)
+
+Bundles are prepaid at signing and lock in a discounted per-call rate for the validity period.
+Calls beyond the bundle are billed at the **overage rate** for that bundle's tier.
+
+| Bundle | Calls included | Total price | Effective/call | Overage/call | Discount | Valid for |
+|---|---:|---:|---:|---:|---:|---:|
+{bundle_table}
+
+**Bundle conditions:** Unused calls expire at end of validity period. Bundles are non-refundable once consumed past 10%.
+"""
+
+    selected_block = ""
+    if selected:
+        sel_limit = f"{selected['call_limit']:,}/month" if selected.get("call_limit") else "unlimited"
+        sel_features = "\n".join(f"- {f}" for f in selected.get("features", [])) or "- Standard feature set"
+        sel_bundle = selected.get("bundle")
+        bundle_note = ""
+        if sel_bundle:
+            bundle_note = (
+                f"\n**Bundle selected:** `{sel_bundle['name']}` — "
+                f"{sel_bundle['calls']:,} calls for `${sel_bundle['price_usd']:.2f}` "
+                f"(`${sel_bundle['per_call_usd']:.4f}/call`). "
+                f"Overage: `${sel_bundle['overage_per_call_usd']:.4f}/call`."
+            )
+        selected_block = f"""
+### Selected tier — {selected['name']}
+
+- **Price per call:** `${selected['per_call_usd']:.4f} USD` (fixed at signing)
+- **Call limit:** `{sel_limit}`
+- **Included features:**
+{sel_features}{bundle_note}
+
+**What counts as one call:** A single HTTP request to the Provider's endpoint that results in a processed response. Retries due to Provider-side errors do not count. Client-initiated retries count as new calls.
+"""
+
+    return f"""## 4. Pricing — Per-Call Fixed Rate
+
+**Pricing mode: per-call.** Client pays a fixed USD amount for each API call to the Provider's endpoint. The rate is locked at signing and does not change with model pricing or token usage — Provider absorbs compute cost variability.
+
+**Currency:** `{r.get('currency', 'USD')}`
+**Rate is fixed** — not tied to live model pricing or token counts.
+{selected_block}
+### Tier menu
+
+| Tier | Price per call | Call limit | Features |
+|---|---:|---|---|
+{tier_table}
+
+- **Selected:** `{selected['name'] if selected else 'N/A'}`
+- **Negotiable:** Call limit, feature set, bundle size, overage rate
+- **Not negotiable:** Safety constraints, privacy policy, minimum payment
+- **Offer valid until:** `{r['expires_on']}`
+{bundle_section}
+### Payment terms
+
+- **Pay-as-you-go:** Billed per call on delivery; invoiced weekly or on reaching a $10 minimum.
+- **Bundles:** Full bundle amount due at signing; overage billed weekly.
+- **Payment deadline:** Net 3 calendar days after invoice.
+- **Deposit:** 10% of estimated monthly spend on signing (non-refundable once work begins).
+"""
+
+
 # ── Contract rendering (called live on every GET) ──────────────────────────────
 
 def _render_contract(data: dict) -> str:
@@ -291,15 +417,84 @@ def _render_contract(data: dict) -> str:
     client_acceptance_date = r.get("client_acceptance_date", "pending")
     contract_url           = f"{SELF_BASE}/contracts/{r['contract_id']}.md"
 
-    # ── Offer menu rows (USD computed live) ────────────────────────────────────
-    def row(tier_name: str, label: str) -> str:
-        t = tiers[tier_name]
-        return (
-            f"| {label} | `{r['model']}` | `{t['token_estimate']:,}` | `{t['followup_budget']:,}` "
-            f"| `{t['price_cap']:,}` | `{int(t['upcharge_pct']*100)}%` | `+{t['upcharge_tokens']:,}` "
-            f"| `+{t['skill_premium']:,}` | `{t['total_tokens']:,}` "
-            f"| `${_live_usd(t['total_tokens'], rate):.4f}` | {t['revisions']} |"
-        )
+    # ── Section 4: branch on pricing_mode ────────────────────────────────────
+    pricing_mode = r.get("pricing_mode", "token")
+
+    if pricing_mode == "per_call":
+        section4 = _render_per_call_section(r)
+        offer_menu_section = ""   # no token offer menu for per-call contracts
+    else:
+        # ── Token offer menu rows (USD computed live) ──────────────────────
+        def row(tier_name: str, label: str) -> str:
+            t = tiers[tier_name]
+            return (
+                f"| {label} | `{r['model']}` | `{t['token_estimate']:,}` | `{t['followup_budget']:,}` "
+                f"| `{t['price_cap']:,}` | `{int(t['upcharge_pct']*100)}%` | `+{t['upcharge_tokens']:,}` "
+                f"| `+{t['skill_premium']:,}` | `{t['total_tokens']:,}` "
+                f"| `${_live_usd(t['total_tokens'], rate):.4f}` | {t['revisions']} |"
+            )
+        section4 = f"""## 4. Pricing, Budget, and Payment — Token Premium System
+
+**Token fields are fixed at contract creation.** USD costs are computed live at read time using the current market rate from the Pricing Scraper.
+
+**Model:** `{r['model']}`
+**Rate:** `{rate} USD per 1,000 tokens` — {rate_source}
+
+**Skill premium justification:** {r['skill_premium_justification']}
+
+### Pricing math (token fields — static)
+
+```
+token_estimate  = requested_tokens × tier_multiplier   [set at generation, never changes]
+followup_budget = token_estimate × 20%                  [set at generation, never changes]
+price_cap       = (token_estimate + followup_budget) / 0.75  [max tokens client pays]
+  invariant: estimate + followup = 75% of cap → 25% provider buffer before change request
+upcharge_tokens = token_estimate × {int(st['upcharge_pct']*100)}%   [service premium, 5–25%]
+total_tokens    = price_cap + upcharge_tokens + skill_premium + materials  [static]
+
+USD cost        = total_tokens × live_rate / 1000       [computed fresh on every read]
+```
+
+### Price components — {r['package'].title()} tier
+
+| Component | Definition | Tokens (static) | USD (live @ {rate}/1k) |
+|---|---|---:|---:|
+| **Token estimate** | Assumed tokens to complete the agreed deliverable | `{st['token_estimate']:,}` | `${_live_usd(st['token_estimate'], rate):.4f}` |
+| **Follow-up budget** | Reserved tokens for second-round revisions (20% of estimate) | `{st['followup_budget']:,}` | `${_live_usd(st['followup_budget'], rate):.4f}` |
+| *(estimate + follow-ups = 75% of price cap)* | Pricing invariant | `{st['token_estimate'] + st['followup_budget']:,}` | — |
+| **Price cap** | Hard ceiling — client pays no more to receive agreed deliverable | `{st['price_cap']:,}` | `${_live_usd(st['price_cap'], rate):.4f}` |
+| **Service premium ({int(st['upcharge_pct']*100)}%)** | Upcharge on token estimate (5–25% band) | `+{st['upcharge_tokens']:,}` | `+${_live_usd(st['upcharge_tokens'], rate):.4f}` |
+| **Skill premium** | Capability value above raw tokens | `+{st['skill_premium']:,}` | `+${_live_usd(st['skill_premium'], rate):.4f}` |
+| **Materials / third-party** | Licenses, APIs, infra (>500 tokens requires pre-approval) | `+{r['materials_estimate']:,}` | `+${_live_usd(r['materials_estimate'], rate):.4f}` |
+| **Grand total** | price_cap + service_premium + skill_premium + materials | **`{st['total_tokens']:,} tokens`** | **`${_live_usd(st['total_tokens'], rate):.4f}`** |
+
+**Pricing invariant:** token_estimate ({st['token_estimate']:,}) + follow-up ({st['followup_budget']:,}) = {st['token_estimate'] + st['followup_budget']:,} = 75% of price_cap ({st['price_cap']:,}). Provider cannot exceed the price_cap without an approved change request.
+
+### Payment terms
+
+- **Currency:** `{r['currency']}`
+- **Rate source:** {rate_source}
+- **Deposit:** 25% of total on signing (non-refundable once work begins)
+- **Remaining:** On delivery of final accepted deliverable
+- **Payment deadline:** Net 3 calendar days after acceptance
+"""
+        offer_menu_section = f"""---
+
+## 5. Offer Menu
+
+> USD estimates computed at read time. Token fields are fixed.
+
+| Option | Model | Token est. | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD (live) | Revisions |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{row('starter', 'A — Starter')}
+{row('standard', 'B — Standard')}
+{row('premium', 'C — Premium')}
+
+- **Selected:** `{r['package'].title()}`
+- **Negotiable:** Token estimate, timeline, revision count, premium %
+- **Not negotiable:** Safety constraints, privacy policy, minimum payment
+- **Offer valid until:** `{r['expires_on']}`
+"""
 
     return f"""---
 a2a_contract_version: "0.2"
@@ -386,69 +581,11 @@ human_review_status: "{'required' if r['human_review_required'] else 'not includ
 
 ---
 
-## 4. Pricing, Budget, and Payment — Token Premium System
-
-**Token fields are fixed at contract creation.** USD costs are computed live at read time using the current market rate from the Pricing Scraper.
-
-**Model:** `{r['model']}`
-**Rate:** `{rate} USD per 1,000 tokens` — {rate_source}
-
-**Skill premium justification:** {r['skill_premium_justification']}
-
-### Pricing math (token fields — static)
-
-```
-token_estimate  = requested_tokens × tier_multiplier   [set at generation, never changes]
-followup_budget = token_estimate × 20%                  [set at generation, never changes]
-price_cap       = (token_estimate + followup_budget) / 0.75  [max tokens client pays]
-  invariant: estimate + followup = 75% of cap → 25% provider buffer before change request
-upcharge_tokens = token_estimate × {int(st['upcharge_pct']*100)}%   [service premium, 5–25%]
-total_tokens    = price_cap + upcharge_tokens + skill_premium + materials  [static]
-
-USD cost        = total_tokens × live_rate / 1000       [computed fresh on every read]
-```
-
-### Price components — {r['package'].title()} tier
-
-| Component | Definition | Tokens (static) | USD (live @ {rate}/1k) |
-|---|---|---:|---:|
-| **Token estimate** | Assumed tokens to complete the agreed deliverable | `{st['token_estimate']:,}` | `${_live_usd(st['token_estimate'], rate):.4f}` |
-| **Follow-up budget** | Reserved tokens for second-round revisions (20% of estimate) | `{st['followup_budget']:,}` | `${_live_usd(st['followup_budget'], rate):.4f}` |
-| *(estimate + follow-ups = 75% of price cap)* | Pricing invariant | `{st['token_estimate'] + st['followup_budget']:,}` | — |
-| **Price cap** | Hard ceiling — client pays no more to receive agreed deliverable | `{st['price_cap']:,}` | `${_live_usd(st['price_cap'], rate):.4f}` |
-| **Service premium ({int(st['upcharge_pct']*100)}%)** | Upcharge on token estimate (5–25% band) | `+{st['upcharge_tokens']:,}` | `+${_live_usd(st['upcharge_tokens'], rate):.4f}` |
-| **Skill premium** | Capability value above raw tokens | `+{st['skill_premium']:,}` | `+${_live_usd(st['skill_premium'], rate):.4f}` |
-| **Materials / third-party** | Licenses, APIs, infra (>500 tokens requires pre-approval) | `+{r['materials_estimate']:,}` | `+${_live_usd(r['materials_estimate'], rate):.4f}` |
-| **Grand total** | price_cap + service_premium + skill_premium + materials | **`{st['total_tokens']:,} tokens`** | **`${_live_usd(st['total_tokens'], rate):.4f}`** |
-
-**Pricing invariant:** token_estimate ({st['token_estimate']:,}) + follow-up ({st['followup_budget']:,}) = {st['token_estimate'] + st['followup_budget']:,} = 75% of price_cap ({st['price_cap']:,}). Provider cannot exceed the price_cap without an approved change request.
-
-### Payment terms
-
-- **Currency:** `{r['currency']}`
-- **Rate source:** {rate_source}
-- **Deposit:** 25% of total on signing (non-refundable once work begins)
-- **Remaining:** On delivery of final accepted deliverable
-- **Payment deadline:** Net 3 calendar days after acceptance
+{section4}
 
 ---
 
-## 5. Offer Menu
-
-> USD estimates computed at read time. Token fields are fixed.
-
-| Option | Model | Token est. | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD (live) | Revisions |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-{row('starter', 'A — Starter')}
-{row('standard', 'B — Standard')}
-{row('premium', 'C — Premium')}
-
-- **Selected:** `{r['package'].title()}`
-- **Negotiable:** Token estimate, timeline, revision count, premium %
-- **Not negotiable:** Safety constraints, privacy policy, minimum payment
-- **Offer valid until:** `{r['expires_on']}`
-
----
+{offer_menu_section}
 
 ## 6. Change Management
 
@@ -644,16 +781,28 @@ def list_contracts():
 
 @app.post("/contracts/generate", status_code=201)
 def generate_contract(req: GenerateRequest):
+    if req.pricing_mode not in ("token", "per_call"):
+        raise HTTPException(status_code=422, detail="pricing_mode must be 'token' or 'per_call'")
+    if req.pricing_mode == "per_call" and not req.per_call_tiers:
+        raise HTTPException(status_code=422, detail="per_call_tiers required when pricing_mode is 'per_call'")
+    if req.pricing_mode == "token" and req.token_estimate == 0:
+        raise HTTPException(status_code=422, detail="token_estimate required when pricing_mode is 'token'")
+
     contract_id     = f"A2A-{date.today().strftime('%Y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
     effective_date  = date.today().isoformat()
     expires_on      = (date.today() + timedelta(days=30)).isoformat()
     target_delivery = (date.today() + timedelta(days=14)).isoformat()
 
-    # Token tiers computed once — stored statically. No USD stored.
-    tiers = _compute_token_tiers(
-        req.token_estimate, req.skill_premium_tokens,
-        req.materials_estimate, req.upcharge_pct,
-    )
+    # Build pricing data based on mode
+    if req.pricing_mode == "token":
+        tiers = _compute_token_tiers(
+            req.token_estimate, req.skill_premium_tokens,
+            req.materials_estimate, req.upcharge_pct,
+        )
+        per_call_tiers_data = []
+    else:
+        tiers = {}   # not used for per-call contracts
+        per_call_tiers_data = [t.model_dump() for t in req.per_call_tiers]
 
     data: dict[str, Any] = {
         "contract_id":               contract_id,
@@ -676,43 +825,65 @@ def generate_contract(req: GenerateRequest):
         "out_of_scope":              req.out_of_scope,
         "deliverables":              [d.model_dump() for d in req.deliverables],
         "model":                     req.model,
+        "pricing_mode":              req.pricing_mode,
+        # token fields
         "token_estimate":            req.token_estimate,
         "skill_premium_tokens":      req.skill_premium_tokens,
         "skill_premium_justification": req.skill_premium_justification,
         "materials_estimate":        req.materials_estimate,
+        "tiers":                     tiers,
+        # per-call fields
+        "per_call_tiers":            per_call_tiers_data,
+        # shared
         "currency":                  req.currency,
         "ip_model":                  req.ip_model,
         "human_review_required":     req.human_review_required,
         "governing_jurisdiction":    req.governing_jurisdiction,
         "questions":                 req.questions.model_dump(),
-        "tiers":                     tiers,       # token fields only, no USD
         "contract_hash":             "pending",
     }
 
-    # Hash is computed from the first render (USD fetched live here too)
     rendered              = _render_contract(data)
     data["contract_hash"] = hashlib.sha256(rendered.encode()).hexdigest()
-
     _contracts[contract_id] = data
 
-    pkg = req.package.lower()
-    st  = tiers.get(pkg, tiers["standard"])
+    # Build response summary based on mode
+    if req.pricing_mode == "token":
+        pkg = req.package.lower()
+        st  = tiers.get(pkg, tiers.get("standard", {}))
+        pricing_summary: dict = {
+            "pricing_mode": "token",
+            "token_fields": {
+                "token_estimate":   st.get("token_estimate", 0),
+                "followup_budget":  st.get("followup_budget", 0),
+                "price_cap":        st.get("price_cap", 0),
+                "upcharge_tokens":  st.get("upcharge_tokens", 0),
+                "skill_premium":    st.get("skill_premium", 0),
+                "total_tokens":     st.get("total_tokens", 0),
+            },
+            "usd_note": "USD costs computed live at read time via Pricing Scraper",
+        }
+    else:
+        sel = next(
+            (t for t in per_call_tiers_data if t["name"].lower().startswith(req.package.lower())),
+            per_call_tiers_data[0] if per_call_tiers_data else {},
+        )
+        pricing_summary = {
+            "pricing_mode": "per_call",
+            "selected_tier": sel.get("name", ""),
+            "per_call_usd":  sel.get("per_call_usd", 0),
+            "call_limit":    sel.get("call_limit"),
+            "bundle":        sel.get("bundle"),
+        }
+
     return {
-        "contract_id":    contract_id,
-        "status":         "draft",
-        "contract_url":   f"{SELF_BASE}/contracts/{contract_id}.md",
-        "model":          req.model,
-        "token_fields": {
-            "token_estimate":   st["token_estimate"],
-            "followup_budget":  st["followup_budget"],
-            "price_cap":        st["price_cap"],
-            "upcharge_tokens":  st["upcharge_tokens"],
-            "skill_premium":    st["skill_premium"],
-            "total_tokens":     st["total_tokens"],
-        },
-        "usd_note": "USD costs are computed live at read time via Pricing Scraper — see GET /contracts/{id}.md",
+        "contract_id":   contract_id,
+        "status":        "draft",
+        "contract_url":  f"{SELF_BASE}/contracts/{contract_id}.md",
+        "model":         req.model,
+        **pricing_summary,
         "notary_status": "pending",
-        "next_step": f"POST {SELF_BASE}/contracts/{contract_id}/notarize",
+        "next_step":     f"POST {SELF_BASE}/contracts/{contract_id}/notarize",
     }
 
 
