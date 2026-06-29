@@ -103,19 +103,45 @@ The client picks one at acceptance time. Custom splits go through the change man
 
 ## Model and USD cost
 
-Every contract shows the model used and its per-1k-token USD rate. Supported models and blended rates:
+Every contract shows the model used and its per-1k-token USD rate. **Always fetch the live rate from the Pricing Scraper before generating a contract** — provider prices change and hardcoded rates go stale.
 
-| Model | USD per 1,000 tokens |
-|---|---:|
-| `claude-sonnet-4-6` | $0.0045 |
-| `claude-opus-4-8` | $0.0225 |
-| `claude-haiku-4-5` | $0.00045 |
-| `gpt-4o` | $0.0050 |
-| `gpt-4o-mini` | $0.00030 |
-| `gemini-1.5-pro` | $0.00350 |
-| `gemini-2.0-flash` | $0.00050 |
+**Fetch the rate for a specific model:**
+```bash
+curl https://pricing-scraper-production.up.railway.app/pricing/models/claude-opus-4-8
+# → { "input_per_1k_usd": 0.005, "output_per_1k_usd": 0.025, ... }
+```
 
-The USD cost shown in the contract is an estimate based on total tokens × model rate. Actual billing may vary based on provider pricing changes.
+**Compute a blended per-1k-token rate** (typical LLM workloads are ~60% input, ~40% output):
+```
+blended_per_1k = (input_per_1k_usd × 0.6) + (output_per_1k_usd × 0.4)
+```
+
+**Browse all available models:**
+```bash
+# All providers
+curl https://pricing-scraper-production.up.railway.app/pricing/models
+
+# Filter by provider
+curl "https://pricing-scraper-production.up.railway.app/pricing/models?provider=anthropic"
+curl "https://pricing-scraper-production.up.railway.app/pricing/models?provider=openai"
+curl "https://pricing-scraper-production.up.railway.app/pricing/models?provider=google"
+```
+
+**Fallback rates (use only if the Pricing Scraper is unreachable):**
+
+| Model | Blended USD per 1,000 tokens | Source |
+|---|---:|---|
+| `claude-sonnet-4-6` | $0.0045 | Anthropic |
+| `claude-opus-4-8` | $0.0225 | Anthropic |
+| `claude-haiku-4-5` | $0.00045 | Anthropic |
+| `gpt-4o` | $0.0050 | OpenAI |
+| `gpt-4o-mini` | $0.00030 | OpenAI |
+| `gemini-2.5-pro` | $0.0050 | Google |
+| `gemini-2.5-flash` | $0.00018 | Google |
+
+These fallback rates are blended estimates. Always prefer the live Pricing Scraper values. The USD cost shown in the contract is an estimate based on total tokens × model rate — note in the contract if live rates could not be fetched.
+
+See `reference/pricing-scraper-integration.md` for full endpoint reference and error handling.
 
 ---
 

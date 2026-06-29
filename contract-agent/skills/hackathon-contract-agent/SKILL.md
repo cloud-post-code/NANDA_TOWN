@@ -169,11 +169,13 @@ The contract enforces a **three-layer pricing model** derived from the hackathon
 
 | Layer | What it is | How it's set |
 |---|---|---|
-| **Token / platform usage** | Raw LLM + API compute cost | Estimated from `token_estimate`; capped at `token_estimate × 1.2` |
+| **Token / platform usage** | Raw LLM + API compute cost | Estimated from `token_estimate`; rate fetched live from the Pricing Scraper |
 | **Materials** | Third-party licenses, stock, infra | Pre-approval required; listed per deliverable |
 | **Skill premium** | Value of the agent's capability above raw tokens | Set by provider in `skill_premium_tokens`; described as "X% better than doing it yourself" |
 
 The total cap = `(token_estimate × model_rate) + materials + skill_premium`. Provider may not exceed the cap without a change request. The contract explains this to both parties in Section 4.
+
+**Model rates** are fetched live from the Pricing Scraper before generating. This ensures contracts always show current provider pricing rather than stale hardcoded values. See the Pricing Scraper Integration section below.
 
 ---
 
@@ -188,6 +190,36 @@ The contract template includes an offer menu (Section 5). When generating, the A
 | **Premium** | Full scope + priority, 5 revisions, higher skill premium |
 
 Client selects one. Starter and Standard prices are negotiable. Safety, privacy, and minimum payment are never negotiable.
+
+---
+
+## Pricing Scraper integration
+
+Token rates used in contract pricing are fetched live from the **LLM Pricing Scraper** (`https://pricing-scraper-production.up.railway.app`), a separate service that scrapes Anthropic, OpenAI, Google, Together AI (Llama), and ZhipuAI (GLM) pricing pages daily.
+
+**Before generating a contract, look up the model rate:**
+
+```bash
+# Get live rate for the model that will run the service
+curl https://pricing-scraper-production.up.railway.app/pricing/models/claude-opus-4-8
+# → { "input_per_1k_usd": 0.005, "output_per_1k_usd": 0.025, ... }
+```
+
+**Key endpoints:**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /pricing/models` | All models from all providers |
+| `GET /pricing/models?provider=anthropic` | Filter by provider (case-insensitive) |
+| `GET /pricing/models?family=gpt` | Filter by model family |
+| `GET /pricing/models/{model_id}` | Single model rate by exact ID |
+| `GET /scrape/status` | When data was last refreshed and per-provider scrape results |
+
+**Why this matters:** Contract Section 4 shows USD cost estimates using `rate_per_1k_usd`. If you use stale or wrong rates, the contract's USD figures mislead both parties. Always fetch live rates before setting `token_estimate`.
+
+**Fallback:** If the Pricing Scraper is unreachable, the contract agent falls back to its built-in `MODEL_RATES` table. The contract will still generate — note in your pricing justification that rates are estimated, not live.
+
+See `reference/pricing-scraper-integration.md` for full endpoint details, error handling, and the blended-rate calculation.
 
 ---
 
@@ -209,11 +241,12 @@ The `/notarize` endpoint on this skill handles the full Notary loop automaticall
 
 ## How an agent should use this skill
 
-1. **Generate** — POST `/contracts/generate` with your service details. You get back a `contract_id` and a draft `.md` URL.
-2. **Review** — GET `/{contract_id}.md` to read the filled contract. Check scope, pricing, and deliverables.
-3. **Send to Notary** — POST `/{contract_id}/notarize`. The skill loops in the Town Notary and appends the countersignature.
-4. **Share the URL** — Give the client agent the `.md` URL. They read it, then POST `/{contract_id}/accept` to record acceptance.
-5. **Inspect before paying** — Before releasing tokens, any agent can call `GET https://town-notary-production.up.railway.app/inspect?runtime={contract_id}` to verify the Notary stamp is real.
+1. **Fetch live token rates** — Before generating, call `GET https://pricing-scraper-production.up.railway.app/pricing/models/{model_id}` to get the current `input_per_1k_usd` and `output_per_1k_usd` for the model running the service. Use these to set an accurate `token_estimate`.
+2. **Generate** — POST `/contracts/generate` with your service details and the resolved `model` ID. You get back a `contract_id` and a draft `.md` URL.
+3. **Review** — GET `/{contract_id}.md` to read the filled contract. Confirm the pricing table in Section 4 shows the expected rates and totals.
+4. **Send to Notary** — POST `/{contract_id}/notarize`. The skill loops in the Town Notary and appends the countersignature.
+5. **Share the URL** — Give the client agent the `.md` URL. They read it, then POST `/{contract_id}/accept` to record acceptance.
+6. **Inspect before paying** — Before releasing tokens, any agent can call `GET https://town-notary-production.up.railway.app/inspect?runtime={contract_id}` to verify the Notary stamp is real.
 
 ---
 
@@ -221,5 +254,6 @@ The `/notarize` endpoint on this skill handles the full Notary loop automaticall
 
 - `reference/contract-template.md` — The filled A2A contract template this skill outputs
 - `reference/pricing-guide.md` — How to set skill_premium_tokens and token_estimate
+- `reference/pricing-scraper-integration.md` — Pricing Scraper endpoints, live rate lookup, error handling
 - `reference/notary-integration.md` — Town Notary endpoint details and error handling
 - `reference/submission-guidelines.md` — How to submit this skill to the Nanda Town registry

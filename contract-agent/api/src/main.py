@@ -10,293 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 
-# ── LLM Pricing catalog ───────────────────────────────────────────────────────
-# Prices in USD per 1M tokens. Updated manually; source links in each entry.
-# Llama and GLM are open-source so we list typical hosted-API prices (e.g. Together AI / ZhipuAI).
-
-_LLM_PRICING: list[dict] = [
-    # ── Anthropic Claude ──────────────────────────────────────────────────────
-    {
-        "provider": "Anthropic",
-        "family": "Claude",
-        "model": "claude-opus-4-8",
-        "display_name": "Claude Opus 4.8",
-        "input_per_1m_usd": 5.00,
-        "output_per_1m_usd": 25.00,
-        "context_window_k": 1000,
-        "notes": "Most capable Opus-tier model",
-        "source": "https://www.anthropic.com/pricing",
-    },
-    {
-        "provider": "Anthropic",
-        "family": "Claude",
-        "model": "claude-opus-4-7",
-        "display_name": "Claude Opus 4.7",
-        "input_per_1m_usd": 5.00,
-        "output_per_1m_usd": 25.00,
-        "context_window_k": 1000,
-        "notes": "Previous-generation Opus",
-        "source": "https://www.anthropic.com/pricing",
-    },
-    {
-        "provider": "Anthropic",
-        "family": "Claude",
-        "model": "claude-sonnet-4-6",
-        "display_name": "Claude Sonnet 4.6",
-        "input_per_1m_usd": 3.00,
-        "output_per_1m_usd": 15.00,
-        "context_window_k": 1000,
-        "notes": "Best speed/intelligence balance",
-        "source": "https://www.anthropic.com/pricing",
-    },
-    {
-        "provider": "Anthropic",
-        "family": "Claude",
-        "model": "claude-haiku-4-5",
-        "display_name": "Claude Haiku 4.5",
-        "input_per_1m_usd": 1.00,
-        "output_per_1m_usd": 5.00,
-        "context_window_k": 200,
-        "notes": "Fastest and most cost-effective",
-        "source": "https://www.anthropic.com/pricing",
-    },
-    {
-        "provider": "Anthropic",
-        "family": "Claude",
-        "model": "claude-fable-5",
-        "display_name": "Claude Fable 5",
-        "input_per_1m_usd": 10.00,
-        "output_per_1m_usd": 50.00,
-        "context_window_k": 1000,
-        "notes": "Most capable widely released Claude model",
-        "source": "https://www.anthropic.com/pricing",
-    },
-    # ── OpenAI GPT ───────────────────────────────────────────────────────────
-    {
-        "provider": "OpenAI",
-        "family": "GPT",
-        "model": "gpt-4o",
-        "display_name": "GPT-4o",
-        "input_per_1m_usd": 2.50,
-        "output_per_1m_usd": 10.00,
-        "context_window_k": 128,
-        "notes": "Flagship multimodal model",
-        "source": "https://openai.com/api/pricing/",
-    },
-    {
-        "provider": "OpenAI",
-        "family": "GPT",
-        "model": "gpt-4o-mini",
-        "display_name": "GPT-4o mini",
-        "input_per_1m_usd": 0.15,
-        "output_per_1m_usd": 0.60,
-        "context_window_k": 128,
-        "notes": "Cost-efficient small model",
-        "source": "https://openai.com/api/pricing/",
-    },
-    {
-        "provider": "OpenAI",
-        "family": "GPT",
-        "model": "gpt-4-turbo",
-        "display_name": "GPT-4 Turbo",
-        "input_per_1m_usd": 10.00,
-        "output_per_1m_usd": 30.00,
-        "context_window_k": 128,
-        "notes": "High-capability with vision",
-        "source": "https://openai.com/api/pricing/",
-    },
-    {
-        "provider": "OpenAI",
-        "family": "GPT",
-        "model": "o1",
-        "display_name": "o1",
-        "input_per_1m_usd": 15.00,
-        "output_per_1m_usd": 60.00,
-        "context_window_k": 200,
-        "notes": "Reasoning model",
-        "source": "https://openai.com/api/pricing/",
-    },
-    {
-        "provider": "OpenAI",
-        "family": "GPT",
-        "model": "o3-mini",
-        "display_name": "o3-mini",
-        "input_per_1m_usd": 1.10,
-        "output_per_1m_usd": 4.40,
-        "context_window_k": 200,
-        "notes": "Cost-efficient reasoning model",
-        "source": "https://openai.com/api/pricing/",
-    },
-    # ── Google Gemini ─────────────────────────────────────────────────────────
-    {
-        "provider": "Google",
-        "family": "Gemini",
-        "model": "gemini-2.5-pro",
-        "display_name": "Gemini 2.5 Pro",
-        "input_per_1m_usd": 1.25,
-        "output_per_1m_usd": 10.00,
-        "context_window_k": 1000,
-        "notes": "Most capable Gemini; ≤200k tokens input price shown",
-        "source": "https://ai.google.dev/pricing",
-    },
-    {
-        "provider": "Google",
-        "family": "Gemini",
-        "model": "gemini-2.5-flash",
-        "display_name": "Gemini 2.5 Flash",
-        "input_per_1m_usd": 0.075,
-        "output_per_1m_usd": 0.30,
-        "context_window_k": 1000,
-        "notes": "Fast and cost-efficient",
-        "source": "https://ai.google.dev/pricing",
-    },
-    {
-        "provider": "Google",
-        "family": "Gemini",
-        "model": "gemini-1.5-pro",
-        "display_name": "Gemini 1.5 Pro",
-        "input_per_1m_usd": 1.25,
-        "output_per_1m_usd": 5.00,
-        "context_window_k": 2000,
-        "notes": "Long-context; ≤128k tokens price shown",
-        "source": "https://ai.google.dev/pricing",
-    },
-    {
-        "provider": "Google",
-        "family": "Gemini",
-        "model": "gemini-1.5-flash",
-        "display_name": "Gemini 1.5 Flash",
-        "input_per_1m_usd": 0.075,
-        "output_per_1m_usd": 0.30,
-        "context_window_k": 1000,
-        "notes": "Speed-optimized; ≤128k price shown",
-        "source": "https://ai.google.dev/pricing",
-    },
-    # ── Meta Llama (via Together AI hosted API) ───────────────────────────────
-    {
-        "provider": "Meta (hosted: Together AI)",
-        "family": "Llama",
-        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "display_name": "Llama 3.3 70B Instruct Turbo",
-        "input_per_1m_usd": 0.88,
-        "output_per_1m_usd": 0.88,
-        "context_window_k": 128,
-        "notes": "Open-source; price from Together AI hosted API",
-        "source": "https://www.together.ai/pricing",
-    },
-    {
-        "provider": "Meta (hosted: Together AI)",
-        "family": "Llama",
-        "model": "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
-        "display_name": "Llama 3.1 405B Instruct Turbo",
-        "input_per_1m_usd": 3.50,
-        "output_per_1m_usd": 3.50,
-        "context_window_k": 128,
-        "notes": "Largest open-source Llama; Together AI hosted price",
-        "source": "https://www.together.ai/pricing",
-    },
-    {
-        "provider": "Meta (hosted: Together AI)",
-        "family": "Llama",
-        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-        "display_name": "Llama 3.1 8B Instruct Turbo",
-        "input_per_1m_usd": 0.18,
-        "output_per_1m_usd": 0.18,
-        "context_window_k": 128,
-        "notes": "Lightweight open-source; Together AI hosted price",
-        "source": "https://www.together.ai/pricing",
-    },
-    # ── Zhipu GLM (via ZhipuAI hosted API) ───────────────────────────────────
-    {
-        "provider": "Zhipu AI",
-        "family": "GLM",
-        "model": "glm-4-plus",
-        "display_name": "GLM-4 Plus",
-        "input_per_1m_usd": 0.70,
-        "output_per_1m_usd": 0.70,
-        "context_window_k": 128,
-        "notes": "Flagship GLM-4 from Zhipu AI (CNY pricing converted at ~7.2 CNY/USD)",
-        "source": "https://open.bigmodel.cn/pricing",
-    },
-    {
-        "provider": "Zhipu AI",
-        "family": "GLM",
-        "model": "glm-4",
-        "display_name": "GLM-4",
-        "input_per_1m_usd": 0.14,
-        "output_per_1m_usd": 0.14,
-        "context_window_k": 128,
-        "notes": "Standard GLM-4 (CNY pricing converted at ~7.2 CNY/USD)",
-        "source": "https://open.bigmodel.cn/pricing",
-    },
-    {
-        "provider": "Zhipu AI",
-        "family": "GLM",
-        "model": "glm-4-flash",
-        "display_name": "GLM-4 Flash",
-        "input_per_1m_usd": 0.0,
-        "output_per_1m_usd": 0.0,
-        "context_window_k": 128,
-        "notes": "Free tier model from Zhipu AI",
-        "source": "https://open.bigmodel.cn/pricing",
-    },
-]
-
-def _build_pricing_response() -> dict:
-    """Group the static catalog by provider+family and compute per-1k-token rates."""
-    by_family: dict[str, list] = {}
-    for m in _LLM_PRICING:
-        key = f"{m['provider']} / {m['family']}"
-        entry = {
-            "model": m["model"],
-            "display_name": m["display_name"],
-            "input_per_1m_tokens_usd": m["input_per_1m_usd"],
-            "output_per_1m_tokens_usd": m["output_per_1m_usd"],
-            "input_per_1k_tokens_usd": round(m["input_per_1m_usd"] / 1000, 8),
-            "output_per_1k_tokens_usd": round(m["output_per_1m_usd"] / 1000, 8),
-            "context_window_k": m["context_window_k"],
-            "notes": m.get("notes", ""),
-            "source": m.get("source", ""),
-        }
-        by_family.setdefault(key, []).append(entry)
-
-    families = []
-    for key, models in by_family.items():
-        provider, family = key.split(" / ", 1)
-        families.append({
-            "provider": provider,
-            "family": family,
-            "models": models,
-        })
-
-    return {
-        "as_of": "2025-06-29",
-        "currency": "USD",
-        "note": (
-            "Prices are sourced from public provider pricing pages. "
-            "Llama prices reflect Together AI hosted API rates. "
-            "GLM prices are converted from CNY at ~7.2 CNY/USD. "
-            "Always verify current rates at the source URLs before billing."
-        ),
-        "families": families,
-        "all_models": [
-            {
-                "provider": m["provider"],
-                "family": m["family"],
-                "model": m["model"],
-                "display_name": m["display_name"],
-                "input_per_1m_tokens_usd": m["input_per_1m_usd"],
-                "output_per_1m_tokens_usd": m["output_per_1m_usd"],
-                "input_per_1k_tokens_usd": round(m["input_per_1m_usd"] / 1000, 8),
-                "output_per_1k_tokens_usd": round(m["output_per_1m_usd"] / 1000, 8),
-                "context_window_k": m["context_window_k"],
-                "notes": m.get("notes", ""),
-                "source": m.get("source", ""),
-            }
-            for m in _LLM_PRICING
-        ],
-    }
-
 app = FastAPI(title="Hackathon Contract Agent", version="1.1.0")
 
 app.add_middleware(
@@ -308,6 +21,7 @@ app.add_middleware(
 
 NOTARY_BASE = "https://town-notary-production.up.railway.app"
 SELF_BASE = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
+PRICING_SCRAPER_BASE = os.getenv("PRICING_SCRAPER_URL", "https://pricing-scraper-production.up.railway.app")
 
 # Stable agent identifier — persisted in /tmp across restarts within a deployment
 _ID_PATH = Path("/tmp/agent_id.txt")
@@ -929,6 +643,7 @@ REFERENCE_FILES = {
     "contract-template": "reference/contract-template.md",
     "pricing-guide": "reference/pricing-guide.md",
     "notary-integration": "reference/notary-integration.md",
+    "pricing-scraper-integration": "reference/pricing-scraper-integration.md",
     "submission-guidelines": "reference/submission-guidelines.md",
 }
 
@@ -996,6 +711,18 @@ def agent_card():
             "name": "The Town Notary",
             "url": NOTARY_BASE,
             "role": "Countersigns executed contracts. Parties contact the Notary directly per Section 12 of the contract.",
+        },
+        "pricing_scraper": {
+            "name": "LLM Pricing Scraper",
+            "url": PRICING_SCRAPER_BASE,
+            "role": "Provides daily-scraped token costs for all major LLM providers. Call GET /pricing/models before setting token_estimate to use live rates.",
+            "endpoints": {
+                "all_models":    f"GET {PRICING_SCRAPER_BASE}/pricing/models",
+                "by_provider":   f"GET {PRICING_SCRAPER_BASE}/pricing/models?provider={{provider}}",
+                "by_family":     f"GET {PRICING_SCRAPER_BASE}/pricing/models?family={{family}}",
+                "single_model":  f"GET {PRICING_SCRAPER_BASE}/pricing/models/{{model_id}}",
+                "scrape_status": f"GET {PRICING_SCRAPER_BASE}/scrape/status",
+            },
         },
         "tags": ["contracts", "a2a", "pricing", "tokens", "hackathon"],
     }
