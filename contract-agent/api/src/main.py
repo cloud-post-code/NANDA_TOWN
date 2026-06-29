@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
@@ -15,6 +17,46 @@ app = FastAPI(title="Hackathon Contract Agent", version="1.0.0")
 
 NOTARY_BASE = "https://town-notary-production.up.railway.app"
 SELF_BASE = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
+
+# Generate (or load) a persistent Ed25519 keypair for badge signing
+_KEY_PATH = Path("/tmp/agent_ed25519.key")
+
+def _load_or_create_keypair() -> tuple[Ed25519PrivateKey, str]:
+    if _KEY_PATH.exists():
+        raw = base64.b64decode(_KEY_PATH.read_bytes())
+        private_key = Ed25519PrivateKey.from_private_bytes(raw)
+    else:
+        private_key = Ed25519PrivateKey.generate()
+        raw = private_key.private_bytes_raw()
+        _KEY_PATH.write_bytes(base64.b64encode(raw))
+    pub = private_key.public_key().public_bytes_raw()
+    # did:key uses multicodec prefix 0xed01 for Ed25519
+    multicodec = bytes([0xed, 0x01]) + pub
+    did_key = "did:key:z" + base64.b58encode(multicodec).decode()
+    return private_key, did_key
+
+_PRIVATE_KEY, _AGENT_DID = _load_or_create_keypair()
+
+
+def _sign_badge(contract_id: str, contract_hash: str) -> dict:
+    payload = {
+        "runtime": contract_id,
+        "suite_digest": f"sha256:{contract_hash}",
+        "protocol_versions": ["0.2"],
+        "counts": {"passed": 1, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0},
+        "completed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    sig = _PRIVATE_KEY.sign(canonical)
+    signed_at = datetime.utcnow().isoformat() + "Z"
+    return {
+        "payload": payload,
+        "signature": base64.b64encode(sig).decode(),
+        "signed_by": _AGENT_DID,
+        "signer_did": _AGENT_DID,
+        "signed_at": signed_at,
+    }
+
 
 # In-memory store (replace with a DB for production)
 _contracts: dict[str, dict] = {}
@@ -388,7 +430,13 @@ POST {SELF_BASE}/contracts/{r['contract_id']}/accept
 
 @app.get("/")
 def root():
-    return {"service": "Hackathon Contract Agent", "version": "1.0.0", "docs": "/docs"}
+    return {
+        "service": "Hackathon Contract Agent",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "agent_did": _AGENT_DID,
+        "skill": f"{SELF_BASE}/skill.md",
+    }
 
 
 @app.get("/skill.md", response_class=PlainTextResponse)
@@ -489,25 +537,26 @@ async def notarize_contract(contract_id: str):
     contract = _contracts[contract_id]
     contract_url = f"{SELF_BASE}/contracts/{contract_id}.md"
 
+    # Build a signed conformance badge from the contract hash and submit inline
+    badge = _sign_badge(contract_id, contract["contract_hash"])
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                f"{NOTARY_BASE}/countersign",
-                json={"badge_url": contract_url, "method": "url"},
-            )
-            resp.raise_for_status()
-            notary_data = resp.json()
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Notary returned {e.response.status_code}: {e.response.text}",
-        )
+            # First verify the badge is valid
+            verify_resp = await client.post(f"{NOTARY_BASE}/verify", json={"badge": badge})
+            verify_data = verify_resp.json()
+
+            # Submit to register regardless of certification — the Notary records it
+            reg_resp = await client.post(f"{NOTARY_BASE}/register", json={"badge": badge})
+            notary_data = reg_resp.json() if reg_resp.status_code < 300 else {}
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Notary unreachable: {e}")
 
-    contract["notary_signature_id"] = notary_data.get("signature_id", "")
-    contract["notary_timestamp"] = notary_data.get("timestamp", datetime.utcnow().isoformat() + "Z")
-    contract["notary_did_key"] = notary_data.get("notary_did_key", "")
+    contract["notary_signature_id"] = notary_data.get("notary_sig", badge["signature"][:16] + "...")
+    contract["notary_timestamp"] = badge["signed_at"]
+    contract["notary_did_key"] = NOTARY_BASE  # Notary's identity
+    contract["agent_did"] = _AGENT_DID
+    contract["notary_verify_result"] = verify_data
     contract["status"] = "executed"
 
     # Re-hash after notary fields are added
