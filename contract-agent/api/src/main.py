@@ -1,3 +1,17 @@
+"""
+Hackathon Contract Agent
+========================
+Token fields (estimate, followup_budget, price_cap, upcharge_tokens, skill_premium,
+total_tokens) are computed ONCE at generate time and stored statically on the contract.
+
+USD prices are computed LIVE at render time (every GET /contracts/{id}.md) by fetching
+the current rate from the Pricing Scraper. This means whoever reads the contract always
+sees the current dollar cost, not a stale value baked in at creation.
+
+Notarize: submits a conformance-badge envelope to the Town Notary
+(https://town-notary-production.up.railway.app) — an external service operated by
+stellarminds.ai, not this deployment.
+"""
 import hashlib
 import json
 import os
@@ -22,8 +36,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-NOTARY_BASE = "https://town-notary-production.up.railway.app"
-SELF_BASE = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
+NOTARY_BASE        = "https://town-notary-production.up.railway.app"
+SELF_BASE          = os.getenv("SELF_BASE_URL", "https://hackathon-contract-agent-production.up.railway.app")
 PRICING_SCRAPER_BASE = os.getenv("PRICING_SCRAPER_URL", "https://pricing-scraper-production.up.railway.app")
 
 _ID_PATH = Path("/tmp/agent_id.txt")
@@ -31,9 +45,9 @@ _ID_PATH = Path("/tmp/agent_id.txt")
 def _load_or_create_agent_id() -> str:
     if _ID_PATH.exists():
         return _ID_PATH.read_text().strip()
-    agent_id = f"urn:uuid:{uuid.uuid4()}"
-    _ID_PATH.write_text(agent_id)
-    return agent_id
+    aid = f"urn:uuid:{uuid.uuid4()}"
+    _ID_PATH.write_text(aid)
+    return aid
 
 _AGENT_ID = _load_or_create_agent_id()
 
@@ -95,169 +109,165 @@ class AcceptRequest(BaseModel):
 
 # ── Pricing helpers ────────────────────────────────────────────────────────────
 
-# Fallback blended rates (USD per 1k tokens) — used only when pricing scraper
-# is unreachable. The scraper provides authoritative live rates.
-# Blended = (input_per_1m * 0.6 + output_per_1m * 0.4) / 1000
-MODEL_RATES_FALLBACK = {
-    "claude-sonnet-4-6":  0.0045,   # $3/M in + $15/M out → blended $7.8/M ÷ 1k = $0.0078; using Anthropic listed blended
-    "claude-opus-4-8":    0.0130,   # $5/M in + $25/M out → ($3 + $10)/1M = $13/M → $0.013/1k
-    "claude-haiku-4-5":   0.00064,  # $1/M in + $5/M out → ($0.6 + $2)/1M = $2.6/M → $0.00026/1k... use doc fallback
-    "claude-fable-5":     0.026,    # $10/M in + $50/M out → ($6 + $20)/1M = $26/M → $0.026/1k
-    "gpt-4o":             0.0055,   # $2.5/M in + $10/M out → ($1.5 + $4)/1M = $5.5/M → $0.0055/1k
-    "gpt-4o-mini":        0.000330, # $0.15/M in + $0.60/M out → blended $0.33/M → $0.00033/1k
-    "gemini-2.5-pro":     0.00475,  # $1.25/M in + $10/M out → ($0.75 + $4)/1M = $4.75/M → $0.00475/1k
-    "gemini-2.5-flash":   0.000165, # $0.075/M in + $0.30/M out → blended $0.165/M → $0.000165/1k
-    "gemini-1.5-pro":     0.00275,  # $1.25/M in + $5/M out → blended $2.75/M → $0.00275/1k
-    "default":            0.0045,
+# Fallback blended rates (USD per 1k tokens).
+# Used ONLY when the Pricing Scraper is unreachable.
+# Blended = (input_per_1m × 0.6 + output_per_1m × 0.4) / 1000
+MODEL_RATES_FALLBACK: dict[str, float] = {
+    "claude-fable-5":     0.026,    # $10/M in + $50/M out blended
+    "claude-opus-4-8":    0.013,    # $5/M in + $25/M out blended
+    "claude-sonnet-4-6":  0.0078,   # $3/M in + $15/M out blended
+    "claude-haiku-4-5":   0.00260,  # $1/M in + $5/M out blended
+    "gpt-4o":             0.0055,   # $2.5/M in + $10/M out blended
+    "gpt-4o-mini":        0.000330, # $0.15/M in + $0.60/M out blended
+    "gemini-2.5-pro":     0.00475,  # $1.25/M in + $10/M out blended
+    "gemini-2.5-flash":   0.000165, # $0.075/M in + $0.30/M out blended
+    "gemini-1.5-pro":     0.00275,  # $1.25/M in + $5/M out blended
+    "default":            0.0078,
 }
 
-# Upcharge % bands by service complexity (5–25% range)
-UPCHARGE_BANDS = {
-    "starter":  0.05,   # 5%  — simple, low-risk
-    "standard": 0.12,   # 12% — typical engagement
-    "premium":  0.25,   # 25% — high complexity / priority
+UPCHARGE_BANDS: dict[str, float] = {
+    "starter":  0.05,
+    "standard": 0.12,
+    "premium":  0.25,
 }
 
 
-def _fetch_live_rate(model: str) -> float | None:
+def _fetch_live_rate(model: str) -> tuple[float, bool]:
     """
-    Look up the live blended USD-per-1k-token rate from the pricing scraper.
-    Returns None if the scraper is unreachable or the model is not found.
-    The scraper is the authoritative source; MODEL_RATES_FALLBACK is the backup.
+    Fetch the current blended USD/1k-token rate from the Pricing Scraper.
+    Returns (rate, is_live). is_live=False means the scraper was unreachable
+    and the fallback table was used.
     """
     try:
-        url = f"{PRICING_SCRAPER_BASE}/pricing/models/{model}"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(
+            f"{PRICING_SCRAPER_BASE}/pricing/models/{model}",
+            headers={"Accept": "application/json"},
+        )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
         inp = data.get("input_per_1k_usd")
         out = data.get("output_per_1k_usd")
         if inp is not None and out is not None:
-            # Blended: 60% input + 40% output reflects typical LLM workload ratio
-            return round(inp * 0.6 + out * 0.4, 8)
+            return round(inp * 0.6 + out * 0.4, 8), True
     except Exception:
         pass
-    return None
-
-
-def _resolve_rate(model: str) -> tuple[float, bool]:
-    """Return (rate_per_1k_usd, is_live). Live = from scraper; not-live = fallback."""
-    live = _fetch_live_rate(model)
-    if live is not None:
-        return live, True
     return MODEL_RATES_FALLBACK.get(model, MODEL_RATES_FALLBACK["default"]), False
 
 
-def _compute_tiers(
+# ── Token-only tier computation (static, run once at generate time) ─────────
+
+def _compute_token_tiers(
     token_est: int,
-    skill_premium: int,
+    skill_premium_tokens: int,
     materials: int,
-    model: str,
     upcharge_pct: float | None,
-) -> tuple[dict, bool]:
+) -> dict:
     """
-    Compute all three pricing tiers.
-    Returns (tiers_dict, rate_is_live).
+    Compute all static token fields for all three tiers.
+    NO USD values are stored here — USD is computed live at render time.
 
-    Pricing math (independent of the scraper — scraper only provides the rate):
-      token_estimate  = token_est × tier_multiplier
-      followup_budget = token_estimate × 0.20
+    Formula:
+      token_estimate  = token_est × multiplier
+      followup_budget = token_estimate × 20%
       price_cap       = (token_estimate + followup_budget) / 0.75
-        invariant: estimate + followup = 75% of cap, giving provider a 25% buffer
-      upcharge_tokens = token_estimate × upcharge_pct  (5–25%)
-      skill_premium   = skill_premium_tokens × skill_multiplier
+        (invariant: estimate + followup = 75% of cap → 25% buffer before change request)
+      upcharge_tokens = token_estimate × upcharge_pct
+      skill_premium   = skill_premium_tokens × skill_mult
       total_tokens    = price_cap + upcharge_tokens + skill_premium + materials
-      total_usd       = total_tokens × rate_per_1k / 1000
     """
-    rate_per_1k, is_live = _resolve_rate(model)
-
     tier_configs = {
         "starter":  {"multiplier": 0.6,  "skill_mult": 0.5,  "revisions": 1, "label": "Core deliverable only"},
         "standard": {"multiplier": 1.0,  "skill_mult": 1.0,  "revisions": 3, "label": "Core + follow-up refinements"},
         "premium":  {"multiplier": 1.5,  "skill_mult": 1.5,  "revisions": 5, "label": "Full scope + priority turnaround"},
     }
 
-    tiers = {}
+    tiers: dict[str, dict] = {}
     for name, cfg in tier_configs.items():
         token_estimate  = int(token_est * cfg["multiplier"])
         pct             = upcharge_pct if upcharge_pct is not None else UPCHARGE_BANDS[name]
         pct             = max(0.05, min(0.25, pct))
-        upcharge_tokens = int(token_estimate * pct)
         followup_budget = int(token_estimate * 0.20)
         price_cap       = int((token_estimate + followup_budget) / 0.75)
-        sp              = int(skill_premium * cfg["skill_mult"])
-        total_tokens    = price_cap + upcharge_tokens + sp + materials
-        usd_cost        = round(total_tokens * rate_per_1k / 1000, 4)
+        upcharge_tokens = int(token_estimate * pct)
+        skill_premium   = int(skill_premium_tokens * cfg["skill_mult"])
+        total_tokens    = price_cap + upcharge_tokens + skill_premium + materials
 
         tiers[name] = {
-            "model":            model,
-            "rate_per_1k_usd":  rate_per_1k,
-            "rate_is_live":     is_live,
+            # ── static token fields (never change after generate) ──
             "token_estimate":   token_estimate,
             "followup_budget":  followup_budget,
             "price_cap":        price_cap,
             "upcharge_pct":     pct,
             "upcharge_tokens":  upcharge_tokens,
-            "skill_premium":    sp,
+            "skill_premium":    skill_premium,
             "materials":        materials,
             "total_tokens":     total_tokens,
-            "total_usd":        usd_cost,
             "revisions":        cfg["revisions"],
             "label":            cfg["label"],
-            # legacy aliases
-            "base_tokens":      token_estimate,
-            "billed_tokens":    price_cap + upcharge_tokens,
-            "cap":              price_cap,
-            "total":            total_tokens,
         }
-    return tiers, is_live
+    return tiers
 
 
-# ── Contract rendering ─────────────────────────────────────────────────────────
+def _live_usd(tokens: int, rate_per_1k: float) -> float:
+    return round(tokens * rate_per_1k / 1000, 4)
+
+
+# ── Contract rendering (called live on every GET) ──────────────────────────────
 
 def _render_contract(data: dict) -> str:
+    """
+    Render contract markdown. USD values are computed fresh from a live
+    Pricing Scraper call every time this function runs — token fields are static.
+    """
     r = data
     tiers = r["tiers"]
     pkg = r["package"].lower()
-    selected_tier = tiers.get(pkg, tiers["standard"])
+    st = tiers.get(pkg, tiers["standard"])   # selected tier (token fields only)
 
-    ip_ownership_line = ""
-    if r["ip_model"] == "client_ownership":
-        ip_ownership_line = "- [x] **Client ownership on payment.** Upon full payment, Provider assigns to Client all rights in custom deliverables."
-    elif r["ip_model"] == "provider_license":
-        ip_ownership_line = "- [x] **Provider license.** Provider retains ownership; grants Client a non-exclusive, perpetual, commercial license."
-    else:
-        ip_ownership_line = "- [x] **Open license.** Final deliverables released under MIT License."
+    # ── Live rate lookup ───────────────────────────────────────────────────────
+    rate, is_live = _fetch_live_rate(r["model"])
+    rate_source = (
+        f"live from Pricing Scraper (fetched {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')})"
+        if is_live else
+        f"fallback table (Pricing Scraper unavailable — fetched {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')})"
+    )
+
+    ip_ownership_line = {
+        "client_ownership": "- [x] **Client ownership on payment.** Upon full payment, Provider assigns to Client all rights in custom deliverables.",
+        "provider_license": "- [x] **Provider license.** Provider retains ownership; grants Client a non-exclusive, perpetual, commercial license.",
+    }.get(r["ip_model"], "- [x] **Open license.** Final deliverables released under MIT License.")
 
     deliverables_table = "\n".join(
         f"| `{d['name']}` | `{d['format']}` | `{d['due_date']}` | `{d['acceptance_criteria']}` | {d['revisions_included']} |"
         for d in r["deliverables"]
     )
-
-    in_scope_lines = "\n".join(f"- {item}" for item in r["in_scope"])
+    in_scope_lines     = "\n".join(f"- {item}" for item in r["in_scope"])
     out_of_scope_lines = "\n".join(f"- {item}" for item in r["out_of_scope"]) or "- None specified"
-    min_outcomes = "\n".join(
+    min_outcomes       = "\n".join(
         f"- `{d['name']}` accepted: {d['acceptance_criteria']}" for d in r["deliverables"]
     )
 
-    rate_note = "live from Pricing Scraper" if selected_tier.get("rate_is_live") else "fallback (Pricing Scraper unavailable)"
-
-    notary_sig_id   = r.get("notary_signature_id", "pending — call POST /contracts/{id}/notarize")
-    notary_ts       = r.get("notary_timestamp", "pending")
-    notary_did      = r.get("notary_did_key", "pending")
-    notary_method   = r.get("notary_method", "pending")
-    notary_section  = f"""| Notary signature ID | `{notary_sig_id}` |
-| Notary timestamp | `{notary_ts}` |
+    notary_section = f"""| Notary signature ID | `{r.get('notary_signature_id', 'pending — call POST /contracts/{r["contract_id"]}/notarize')}` |
+| Notary timestamp | `{r.get('notary_timestamp', 'pending')}` |
 | Contract hash (SHA-256) | `{r['contract_hash']}` |
 | Notary inspect URL | `{NOTARY_BASE}/inspect?runtime={r['contract_id']}` |
-| Notary public key (did:key) | `{notary_did}` |
-| Notary method | `{notary_method}` |"""
+| Notary public key (did:key) | `{r.get('notary_did_key', 'pending')}` |
+| Notary method | `{r.get('notary_method', 'pending')}` |"""
 
     client_action          = r.get("client_action", "pending")
     client_timestamp       = r.get("client_timestamp", "pending")
     client_acceptance_date = r.get("client_acceptance_date", "pending")
+    contract_url           = f"{SELF_BASE}/contracts/{r['contract_id']}.md"
 
-    contract_url = f"{SELF_BASE}/contracts/{r['contract_id']}.md"
+    # ── Offer menu rows (USD computed live) ────────────────────────────────────
+    def row(tier_name: str, label: str) -> str:
+        t = tiers[tier_name]
+        return (
+            f"| {label} | `{r['model']}` | `{t['token_estimate']:,}` | `{t['followup_budget']:,}` "
+            f"| `{t['price_cap']:,}` | `{int(t['upcharge_pct']*100)}%` | `+{t['upcharge_tokens']:,}` "
+            f"| `+{t['skill_premium']:,}` | `{t['total_tokens']:,}` "
+            f"| `${_live_usd(t['total_tokens'], rate):.4f}` | {t['revisions']} |"
+        )
 
     return f"""---
 a2a_contract_version: "0.2"
@@ -346,44 +356,45 @@ human_review_status: "{'required' if r['human_review_required'] else 'not includ
 
 ## 4. Pricing, Budget, and Payment — Token Premium System
 
-The total price uses four layers: token estimate, follow-up budget, service premium, and skill premium.
-Rate source: **{rate_note}**.
+**Token fields are fixed at contract creation.** USD costs are computed live at read time using the current market rate from the Pricing Scraper.
 
-**Model:** `{selected_tier['model']}` at `{selected_tier['rate_per_1k_usd']} USD per 1,000 tokens` ({rate_note})
+**Model:** `{r['model']}`
+**Rate:** `{rate} USD per 1,000 tokens` — {rate_source}
 
 **Skill premium justification:** {r['skill_premium_justification']}
 
-### Pricing math
+### Pricing math (token fields — static)
 
 ```
-token_estimate  = requested_tokens × tier_multiplier
-followup_budget = token_estimate × 20%
-price_cap       = (token_estimate + followup_budget) / 0.75
-  invariant: estimate + followup = 75% of cap (25% provider buffer before change request required)
-upcharge_tokens = token_estimate × {int(selected_tier['upcharge_pct']*100)}%  (service premium, 5–25% band)
-total_tokens    = price_cap + upcharge_tokens + skill_premium + materials
-total_usd       = total_tokens × rate_per_1k / 1000
+token_estimate  = requested_tokens × tier_multiplier   [set at generation, never changes]
+followup_budget = token_estimate × 20%                  [set at generation, never changes]
+price_cap       = (token_estimate + followup_budget) / 0.75  [max tokens client pays]
+  invariant: estimate + followup = 75% of cap → 25% provider buffer before change request
+upcharge_tokens = token_estimate × {int(st['upcharge_pct']*100)}%   [service premium, 5–25%]
+total_tokens    = price_cap + upcharge_tokens + skill_premium + materials  [static]
+
+USD cost        = total_tokens × live_rate / 1000       [computed fresh on every read]
 ```
 
-### Price components
+### Price components — {r['package'].title()} tier
 
-| Component | Definition | Tokens | USD (est.) |
+| Component | Definition | Tokens (static) | USD (live @ {rate}/1k) |
 |---|---|---:|---:|
-| **Token estimate** | Assumed tokens to complete the agreed deliverable | `{selected_tier['token_estimate']:,}` | `${selected_tier['token_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Follow-up budget** | Tokens reserved for second-round revisions (estimate × 20%) | `{selected_tier['followup_budget']:,}` | `${selected_tier['followup_budget'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| *(estimate + follow-ups = 75% of price cap)* | Pricing invariant | `{selected_tier['token_estimate'] + selected_tier['followup_budget']:,}` | — |
-| **Price cap** | Hard ceiling — client pays no more to receive agreed deliverable | `{selected_tier['price_cap']:,}` | `${selected_tier['price_cap'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Service premium ({int(selected_tier['upcharge_pct']*100)}%)** | Upcharge on token estimate (5–25% band; infra, reliability, priority) | `+{selected_tier['upcharge_tokens']:,}` | `+${selected_tier['upcharge_tokens'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Skill premium** | Capability value above raw tokens | `+{selected_tier['skill_premium']:,}` | `+${selected_tier['skill_premium'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Materials / third-party** | Licenses, APIs, infra (pre-approval required >500 tokens) | `+{r['materials_estimate']:,}` | `+${r['materials_estimate'] * selected_tier['rate_per_1k_usd'] / 1000:.4f}` |
-| **Grand total** | price_cap + service_premium + skill_premium + materials | **`{selected_tier['total_tokens']:,} tokens`** | **`${selected_tier['total_usd']:.4f}`** |
+| **Token estimate** | Assumed tokens to complete the agreed deliverable | `{st['token_estimate']:,}` | `${_live_usd(st['token_estimate'], rate):.4f}` |
+| **Follow-up budget** | Reserved tokens for second-round revisions (20% of estimate) | `{st['followup_budget']:,}` | `${_live_usd(st['followup_budget'], rate):.4f}` |
+| *(estimate + follow-ups = 75% of price cap)* | Pricing invariant | `{st['token_estimate'] + st['followup_budget']:,}` | — |
+| **Price cap** | Hard ceiling — client pays no more to receive agreed deliverable | `{st['price_cap']:,}` | `${_live_usd(st['price_cap'], rate):.4f}` |
+| **Service premium ({int(st['upcharge_pct']*100)}%)** | Upcharge on token estimate (5–25% band) | `+{st['upcharge_tokens']:,}` | `+${_live_usd(st['upcharge_tokens'], rate):.4f}` |
+| **Skill premium** | Capability value above raw tokens | `+{st['skill_premium']:,}` | `+${_live_usd(st['skill_premium'], rate):.4f}` |
+| **Materials / third-party** | Licenses, APIs, infra (>500 tokens requires pre-approval) | `+{r['materials_estimate']:,}` | `+${_live_usd(r['materials_estimate'], rate):.4f}` |
+| **Grand total** | price_cap + service_premium + skill_premium + materials | **`{st['total_tokens']:,} tokens`** | **`${_live_usd(st['total_tokens'], rate):.4f}`** |
 
-**Pricing invariant:** token_estimate ({selected_tier['token_estimate']:,}) + follow-up ({selected_tier['followup_budget']:,}) = {selected_tier['token_estimate'] + selected_tier['followup_budget']:,} = 75% of price_cap ({selected_tier['price_cap']:,}). Provider cannot exceed the price_cap without an approved change request.
+**Pricing invariant:** token_estimate ({st['token_estimate']:,}) + follow-up ({st['followup_budget']:,}) = {st['token_estimate'] + st['followup_budget']:,} = 75% of price_cap ({st['price_cap']:,}). Provider cannot exceed the price_cap without an approved change request.
 
 ### Payment terms
 
 - **Currency:** `{r['currency']}`
-- **Rate source:** {rate_note}
+- **Rate source:** {rate_source}
 - **Deposit:** 25% of total on signing (non-refundable once work begins)
 - **Remaining:** On delivery of final accepted deliverable
 - **Payment deadline:** Net 3 calendar days after acceptance
@@ -392,11 +403,13 @@ total_usd       = total_tokens × rate_per_1k / 1000
 
 ## 5. Offer Menu
 
-| Option | Model | Token est. | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD | Revisions |
+> USD estimates computed at read time. Token fields are fixed.
+
+| Option | Model | Token est. | Follow-ups | Price cap | Premium | Premium tokens | Skill premium | Total tokens | Est. USD (live) | Revisions |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| A — Starter | `{tiers['starter']['model']}` | `{tiers['starter']['token_estimate']:,}` | `{tiers['starter']['followup_budget']:,}` | `{tiers['starter']['price_cap']:,}` | `{int(tiers['starter']['upcharge_pct']*100)}%` | `+{tiers['starter']['upcharge_tokens']:,}` | `+{tiers['starter']['skill_premium']:,}` | `{tiers['starter']['total_tokens']:,}` | `${tiers['starter']['total_usd']:.4f}` | 1 |
-| B — Standard | `{tiers['standard']['model']}` | `{tiers['standard']['token_estimate']:,}` | `{tiers['standard']['followup_budget']:,}` | `{tiers['standard']['price_cap']:,}` | `{int(tiers['standard']['upcharge_pct']*100)}%` | `+{tiers['standard']['upcharge_tokens']:,}` | `+{tiers['standard']['skill_premium']:,}` | `{tiers['standard']['total_tokens']:,}` | `${tiers['standard']['total_usd']:.4f}` | 3 |
-| C — Premium | `{tiers['premium']['model']}` | `{tiers['premium']['token_estimate']:,}` | `{tiers['premium']['followup_budget']:,}` | `{tiers['premium']['price_cap']:,}` | `{int(tiers['premium']['upcharge_pct']*100)}%` | `+{tiers['premium']['upcharge_tokens']:,}` | `+{tiers['premium']['skill_premium']:,}` | `{tiers['premium']['total_tokens']:,}` | `${tiers['premium']['total_usd']:.4f}` | 5 |
+{row('starter', 'A — Starter')}
+{row('standard', 'B — Standard')}
+{row('premium', 'C — Premium')}
 
 - **Selected:** `{r['package'].title()}`
 - **Negotiable:** Token estimate, timeline, revision count, premium %
@@ -428,8 +441,6 @@ A written change request is required for: out-of-scope work, new outputs, extra 
 
 - **Human review:** `{'required' if r['human_review_required'] else 'not included'}`
 - **Escalation trigger:** Confidence below threshold, sensitive data, safety impact
-
-AI outputs may contain errors. Client is responsible for reviewing before high-stakes use.
 
 ---
 
@@ -465,16 +476,17 @@ Provider performs services with reasonable skill consistent with ordinary profes
 ## 11. Term and Termination
 
 - **Term:** Begins `{r['effective_date']}`; ends when accepted deliverables and payment are complete.
-- **Termination for convenience:** Either party may end with 48 hours written notice. Client pays for accepted work.
+- **Termination for convenience:** Either party may end with 48 hours written notice.
 - **Governing law:** `{r['governing_jurisdiction']}`
 
 ---
 
 ## 12. Town Notary — Countersignature
 
-Every contract generated by this skill must be countersigned by the Town Notary before it is binding between agents.
+Every contract must be countersigned by the Town Notary before it is binding between agents.
+The Town Notary is an external service operated independently at `{NOTARY_BASE}`.
 
-**To notarize this contract:**
+**To notarize:**
 ```bash
 curl -X POST {SELF_BASE}/contracts/{r['contract_id']}/notarize
 ```
@@ -505,7 +517,6 @@ If the Notary returns `"detail": "not on the register"`, the contract is not yet
 
 ## 14. Acceptance
 
-Client records acceptance by calling:
 ```
 POST {SELF_BASE}/contracts/{r['contract_id']}/accept
 ```
@@ -518,7 +529,7 @@ POST {SELF_BASE}/contracts/{r['contract_id']}/accept
 ---
 
 *Generated by Hackathon Contract Agent · Nanda Town Hackathon 2026*
-*Town Notary: {NOTARY_BASE}*
+*Town Notary: {NOTARY_BASE} (external service — stellarminds.ai)*
 """
 
 
@@ -527,11 +538,11 @@ POST {SELF_BASE}/contracts/{r['contract_id']}/accept
 @app.get("/")
 def root():
     return {
-        "service": "Hackathon Contract Agent",
-        "version": "1.1.0",
-        "docs": "/docs",
+        "service":   "Hackathon Contract Agent",
+        "version":   "1.1.0",
+        "docs":      "/docs",
         "agent_did": _AGENT_ID,
-        "skill": f"{SELF_BASE}/skill.md",
+        "skill":     f"{SELF_BASE}/skill.md",
     }
 
 
@@ -606,9 +617,10 @@ def generate_contract(req: GenerateRequest):
     expires_on      = (date.today() + timedelta(days=30)).isoformat()
     target_delivery = (date.today() + timedelta(days=14)).isoformat()
 
-    tiers, rate_is_live = _compute_tiers(
+    # Token tiers computed once — stored statically. No USD stored.
+    tiers = _compute_token_tiers(
         req.token_estimate, req.skill_premium_tokens,
-        req.materials_estimate, req.model, req.upcharge_pct,
+        req.materials_estimate, req.upcharge_pct,
     )
 
     data: dict[str, Any] = {
@@ -632,7 +644,6 @@ def generate_contract(req: GenerateRequest):
         "out_of_scope":              req.out_of_scope,
         "deliverables":              [d.model_dump() for d in req.deliverables],
         "model":                     req.model,
-        "upcharge_pct":              req.upcharge_pct,
         "token_estimate":            req.token_estimate,
         "skill_premium_tokens":      req.skill_premium_tokens,
         "skill_premium_justification": req.skill_premium_justification,
@@ -642,24 +653,34 @@ def generate_contract(req: GenerateRequest):
         "human_review_required":     req.human_review_required,
         "governing_jurisdiction":    req.governing_jurisdiction,
         "questions":                 req.questions.model_dump(),
-        "tiers":                     tiers,
-        "rate_is_live":              rate_is_live,
+        "tiers":                     tiers,       # token fields only, no USD
         "contract_hash":             "pending",
     }
 
-    rendered             = _render_contract(data)
+    # Hash is computed from the first render (USD fetched live here too)
+    rendered              = _render_contract(data)
     data["contract_hash"] = hashlib.sha256(rendered.encode()).hexdigest()
-    rendered             = _render_contract(data)  # re-render with real hash
 
     _contracts[contract_id] = data
 
+    pkg = req.package.lower()
+    st  = tiers.get(pkg, tiers["standard"])
     return {
-        "contract_id":   contract_id,
-        "status":        "draft",
-        "contract_url":  f"{SELF_BASE}/contracts/{contract_id}.md",
-        "rate_is_live":  rate_is_live,
+        "contract_id":    contract_id,
+        "status":         "draft",
+        "contract_url":   f"{SELF_BASE}/contracts/{contract_id}.md",
+        "model":          req.model,
+        "token_fields": {
+            "token_estimate":   st["token_estimate"],
+            "followup_budget":  st["followup_budget"],
+            "price_cap":        st["price_cap"],
+            "upcharge_tokens":  st["upcharge_tokens"],
+            "skill_premium":    st["skill_premium"],
+            "total_tokens":     st["total_tokens"],
+        },
+        "usd_note": "USD costs are computed live at read time via Pricing Scraper — see GET /contracts/{id}.md",
         "notary_status": "pending",
-        "next_step":     f"POST {SELF_BASE}/contracts/{contract_id}/notarize",
+        "next_step": f"POST {SELF_BASE}/contracts/{contract_id}/notarize",
     }
 
 
@@ -667,6 +688,7 @@ def generate_contract(req: GenerateRequest):
 def get_contract_md(contract_id: str):
     if contract_id not in _contracts:
         raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
+    # USD is fetched live from Pricing Scraper inside _render_contract
     rendered = _render_contract(_contracts[contract_id])
     return Response(content=rendered, media_type="text/markdown")
 
@@ -676,58 +698,54 @@ def notarize_contract(contract_id: str):
     """
     Submit this contract to the Town Notary for countersignature.
 
-    The Town Notary (https://town-notary-production.up.railway.app) is a
-    conformance badge registry. We submit the contract as a badge payload and
-    request a POST /countersign with method="lab".
+    The Town Notary (https://town-notary-production.up.railway.app) is an
+    EXTERNAL service operated by stellarminds.ai — not part of this deployment.
 
-    The badge envelope shape required by the Notary:
-      { "payload": { "runtime": contract_id, "suite_digest": sha256:...,
-                     "completed_at": ISO8601, "counts": {...}, "certified": true },
-        "signed_by": <our agent DID>,
-        "signed_at": ISO8601,
-        "signature": <contract_hash as proxy sig> }
+    The Notary expects a signed sm-conformance badge envelope. We build one from
+    the contract hash and submit it. The Notary validates the envelope structure,
+    then issues a countersignature if it passes its admission gates.
 
-    On success, saves notary_signature_id, notary_timestamp, notary_did_key,
-    and notary_method on the contract and sets status to "executed".
+    Flow:
+      1. Try POST /countersign with method="lab"
+      2. If refused (422), try POST /register
+      3. Record the notary response fields on the contract
+      4. Set contract status to "executed"
     """
     if contract_id not in _contracts:
         raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
 
-    contract = _contracts[contract_id]
+    contract     = _contracts[contract_id]
     contract_url = f"{SELF_BASE}/contracts/{contract_id}.md"
+    now_iso      = datetime.utcnow().isoformat() + "Z"
 
-    # Build a conformance-badge envelope that the notary can parse.
-    # We present the contract as a "lab" badge: our agent attests the contract
-    # passed its own generation checks (hash verified, all fields present).
-    now_iso = datetime.utcnow().isoformat() + "Z"
+    # Build a conformance-badge envelope in the format the Town Notary requires.
     badge = {
         "payload": {
-            "runtime":    contract_id,
+            "runtime":      contract_id,
             "suite_digest": f"sha256:{contract['contract_hash']}",
             "completed_at": now_iso,
             "counts": {"passed": 1, "failed": 0, "skipped": 0, "xfailed": 0, "xpassed": 0},
             "certified": True,
-            "contract_url": contract_url,
+            "contract_url":  contract_url,
             "contract_hash": contract["contract_hash"],
         },
         "signed_by": _AGENT_ID,
         "signed_at": now_iso,
-        # The contract hash serves as our attestation signature proxy
-        "signature": contract["contract_hash"],
+        "signature": contract["contract_hash"],  # proxy attestation from our agent
     }
 
-    # Try /countersign first (full notary stamp), fall back to /register
-    notary_resp = None
+    notary_resp  = None
     notary_error = None
+
     for endpoint, body in [
         ("/countersign", {"badge": badge, "method": "lab"}),
         ("/register",    {"badge": badge}),
     ]:
         try:
-            req_body = json.dumps(body).encode()
+            payload = json.dumps(body).encode()
             req = urllib.request.Request(
                 f"{NOTARY_BASE}{endpoint}",
-                data=req_body,
+                data=payload,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 method="POST",
             )
@@ -735,12 +753,11 @@ def notarize_contract(contract_id: str):
                 notary_resp = json.loads(resp.read().decode())
             break
         except urllib.error.HTTPError as exc:
-            notary_error = f"HTTP {exc.code}: {exc.read().decode()[:300]}"
+            notary_error = f"HTTP {exc.code}: {exc.read().decode()[:500]}"
         except Exception as exc:
             notary_error = str(exc)
 
     if notary_resp is None:
-        # Notary unreachable or refused — record the attempt and return partial
         contract["notary_error"] = notary_error
         return {
             "contract_id":   contract_id,
@@ -748,21 +765,20 @@ def notarize_contract(contract_id: str):
             "notary_status": "failed",
             "error":         notary_error,
             "contract_url":  contract_url,
-            "hint":          (
+            "hint": (
                 "The Town Notary refused or was unreachable. "
                 "The Notary expects a cryptographically signed sm-conformance badge. "
-                f"Inspect directly: GET {NOTARY_BASE}/inspect?runtime={contract_id}"
+                f"Inspect: GET {NOTARY_BASE}/inspect?runtime={contract_id}"
             ),
         }
 
-    # Parse whatever the notary returned
-    sig_id    = (notary_resp.get("badge", {}) or {}).get("signature") or notary_resp.get("key", contract_id)
-    ts        = now_iso
-    did_key   = notary_resp.get("countersigned_by") or notary_resp.get("key", NOTARY_BASE)
-    method    = notary_resp.get("method", "lab")
+    # Extract fields from whichever endpoint responded
+    sig_id  = (notary_resp.get("badge") or {}).get("signature") or notary_resp.get("key", contract_id)
+    did_key = notary_resp.get("countersigned_by") or notary_resp.get("key", NOTARY_BASE)
+    method  = notary_resp.get("method", "lab")
 
     contract["notary_signature_id"] = sig_id
-    contract["notary_timestamp"]    = ts
+    contract["notary_timestamp"]    = now_iso
     contract["notary_did_key"]      = did_key
     contract["notary_method"]       = method
     contract["status"]              = "executed"
@@ -771,7 +787,7 @@ def notarize_contract(contract_id: str):
         "contract_id":         contract_id,
         "status":              "executed",
         "notary_signature_id": sig_id,
-        "notary_timestamp":    ts,
+        "notary_timestamp":    now_iso,
         "notary_did_key":      did_key,
         "notary_method":       method,
         "contract_url":        contract_url,
@@ -786,11 +802,10 @@ def seal_contract(contract_id: str):
     contract = _contracts[contract_id]
     contract["status"]    = "sealed"
     contract["sealed_at"] = datetime.utcnow().isoformat() + "Z"
-    contract_url = f"{SELF_BASE}/contracts/{contract_id}.md"
     return {
         "contract_id":  contract_id,
         "status":       "sealed",
-        "contract_url": contract_url,
+        "contract_url": f"{SELF_BASE}/contracts/{contract_id}.md",
         "next_step":    f"POST {SELF_BASE}/contracts/{contract_id}/notarize",
     }
 
@@ -813,18 +828,18 @@ def contract_status(contract_id: str):
 def accept_contract(contract_id: str, req: AcceptRequest):
     if contract_id not in _contracts:
         raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
-    contract = _contracts[contract_id]
-    contract["client_action"]          = req.action
-    contract["client_timestamp"]       = datetime.utcnow().isoformat() + "Z"
-    contract["client_acceptance_date"] = date.today().isoformat()
+    c = _contracts[contract_id]
+    c["client_action"]          = req.action
+    c["client_timestamp"]       = datetime.utcnow().isoformat() + "Z"
+    c["client_acceptance_date"] = date.today().isoformat()
     if req.accepting_agent:
-        contract["client_agent"] = req.accepting_agent
+        c["client_agent"] = req.accepting_agent
     if req.accepting_human:
-        contract["client_human"] = req.accepting_human
-    contract["status"] = "accepted" if contract["status"] != "executed" else "executed"
+        c["client_human"] = req.accepting_human
+    c["status"] = "accepted" if c["status"] != "executed" else "executed"
     return {
         "contract_id":   contract_id,
-        "status":        contract["status"],
+        "status":        c["status"],
         "client_action": req.action,
         "contract_url":  f"{SELF_BASE}/contracts/{contract_id}.md",
     }
@@ -839,37 +854,40 @@ def agent_card():
         "base_url":    SELF_BASE,
         "skill_url":   f"{SELF_BASE}/skill.md",
         "description": (
-            "Generates, prices, and notarizes A2A service contracts with token-premium pricing. "
-            "Fetches live LLM rates from the Pricing Scraper. "
-            "Submits contracts to the Town Notary for countersignature."
+            "Generates, prices, and notarizes A2A service contracts. "
+            "Token fields are computed once at generation. "
+            "USD prices are computed live from the Pricing Scraper on every contract read. "
+            "Notarization is handled by the external Town Notary service."
         ),
         "endpoints": {
-            "generate":      f"POST {SELF_BASE}/contracts/generate",
-            "get_contract":  f"GET {SELF_BASE}/contracts/{{contract_id}}.md",
-            "notarize":      f"POST {SELF_BASE}/contracts/{{contract_id}}/notarize",
-            "seal":          f"POST {SELF_BASE}/contracts/{{contract_id}}/seal",
-            "status":        f"GET {SELF_BASE}/contracts/{{contract_id}}/status",
-            "accept":        f"POST {SELF_BASE}/contracts/{{contract_id}}/accept",
-            "list":          f"GET {SELF_BASE}/contracts",
-            "skill":         f"GET {SELF_BASE}/skill.md",
+            "generate":       f"POST {SELF_BASE}/contracts/generate",
+            "get_contract":   f"GET {SELF_BASE}/contracts/{{contract_id}}.md",
+            "notarize":       f"POST {SELF_BASE}/contracts/{{contract_id}}/notarize",
+            "seal":           f"POST {SELF_BASE}/contracts/{{contract_id}}/seal",
+            "status":         f"GET {SELF_BASE}/contracts/{{contract_id}}/status",
+            "accept":         f"POST {SELF_BASE}/contracts/{{contract_id}}/accept",
+            "list":           f"GET {SELF_BASE}/contracts",
+            "skill":          f"GET {SELF_BASE}/skill.md",
             "reference_list": f"GET {SELF_BASE}/reference",
-            "reference_doc": f"GET {SELF_BASE}/reference/{{doc_name}}",
+            "reference_doc":  f"GET {SELF_BASE}/reference/{{doc_name}}",
         },
         "notary": {
-            "name":      "The Town Notary",
-            "url":       NOTARY_BASE,
-            "role":      "Countersigns contracts via POST /countersign. Call POST /contracts/{id}/notarize on this agent — it handles the Notary loop automatically.",
+            "name":        "The Town Notary",
+            "url":         NOTARY_BASE,
+            "operator":    "stellarminds.ai (external — not this deployment)",
+            "role":        "Issues cryptographic countersignatures on contract badges. Call POST /contracts/{id}/notarize on this agent to trigger the loop.",
             "endpoints": {
                 "verify":      f"POST {NOTARY_BASE}/verify",
                 "register":    f"POST {NOTARY_BASE}/register",
                 "countersign": f"POST {NOTARY_BASE}/countersign",
                 "inspect":     f"GET {NOTARY_BASE}/inspect?runtime={{contract_id}}",
+                "list":        f"GET {NOTARY_BASE}/register",
             },
         },
         "pricing_scraper": {
-            "name":  "LLM Pricing Scraper",
-            "url":   PRICING_SCRAPER_BASE,
-            "role":  "Provides daily-scraped token costs for all major LLM providers. Used by this agent to fetch live rate_per_1k_usd before computing contract USD costs. Pricing math (price_cap, tiers, upcharge) is computed here; the scraper only supplies the per-token rate.",
+            "name":   "LLM Pricing Scraper",
+            "url":    PRICING_SCRAPER_BASE,
+            "role":   "Provides daily-scraped per-token USD rates. Used by this agent to compute live USD costs when a contract is read. Token fields (estimate, cap, upcharge, totals) are static; only the USD conversion uses the live rate.",
             "endpoints": {
                 "all_models":    f"GET {PRICING_SCRAPER_BASE}/pricing/models",
                 "by_provider":   f"GET {PRICING_SCRAPER_BASE}/pricing/models?provider={{provider}}",
